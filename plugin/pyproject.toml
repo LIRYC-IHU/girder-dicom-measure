@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "girder-dicom-measure-flow"
+version = "0.1.0"
+description = "Plugin Girder : sert la SPA d'annotation DICOM et ajoute un point d'entrée dans la vue item"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+dependencies = [
+    "girder>=3.1",
+    "pydicom>=2.3",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pydicom>=2.3"]
+
+# Enregistrement du plugin auprès de Girder (entry point côté serveur).
+[project.entry-points."girder.plugin"]
+dicom_measure_flow = "girder_dicom_measure_flow:DicomMeasureFlowPlugin"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools]
+packages = ["girder_dicom_measure_flow"]
+
+[tool.setuptools.package-data]
+# Le bundle de la SPA (web/dist) est copié ici à la construction (cf. Makefile).
+girder_dicom_measure_flow = ["web_dist/**/*"]

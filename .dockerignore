@@ -1,0 +1,8 @@
+**/node_modules
+web/dist
+plugin/girder_dicom_measure_flow/web_dist
+**/__pycache__
+**/*.egg-info
+.git
+.claude
+test_data

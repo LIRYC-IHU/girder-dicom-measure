@@ -1,0 +1,45 @@
+# Stack de dev/test local (cf. CLAUDE.md § Déploiement).
+# Girder sert lui-même la SPA via le plugin (/dmf) → pas de nginx/reverse-proxy séparé.
+#
+#   docker compose up --build      → http://localhost:8080
+#   Compte créé automatiquement : admin / password
+#   Viewer : http://localhost:8080/dmf/?itemId=<id>
+
+services:
+  mongodb:
+    image: mongo:7
+    volumes:
+      - mongodb_data:/data/db
+    restart: unless-stopped
+
+  girder:
+    platform: linux/amd64 # image de base Girder disponible uniquement en amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - mongodb
+    ports:
+      - "8080:8080"
+    environment:
+      - GIRDER_MONGO_URI=mongodb://mongodb:27017/girder
+    # `girder serve` bind 127.0.0.1 par défaut → forcer 0.0.0.0 pour être joignable.
+    # (l'entrypoint de l'image est déjà « girder serve » ; on n'ajoute que les args)
+    command: ["--host", "0.0.0.0"]
+    volumes:
+      - girder_assetstore:/assetstore
+    restart: unless-stopped
+
+  # Provisioning one-shot : crée l'admin (1er user = admin) + un assetstore filesystem.
+  girder-init:
+    image: curlimages/curl:8.10.1
+    depends_on:
+      - girder
+    restart: "no"
+    volumes:
+      - ./scripts/girder-init.sh:/init.sh:ro
+    entrypoint: ["sh", "/init.sh"]
+
+volumes:
+  mongodb_data:
+  girder_assetstore:

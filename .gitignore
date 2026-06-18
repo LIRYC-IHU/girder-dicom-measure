@@ -1,0 +1,19 @@
+# Données DICOM de test — NE PAS committer (contiennent potentiellement des données
+# patient / PHI). Fournir ses propres fichiers dans test_data/<étude>/*.dcm (de préférence
+# anonymisés ou synthétiques).
+test_data/
+
+# Bundle SPA embarqué (généré par `make build`)
+plugin/girder_dicom_measure_flow/web_dist/
+
+# Artefacts de build
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.egg-info/
+*.pyc
+.venv/
+
+# OS
+.DS_Store
