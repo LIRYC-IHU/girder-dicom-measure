@@ -16,15 +16,26 @@ dependencies = [
     # qu'à partir de cette version pour autre chose que le RLE.
     "pydicom>=3",
     "numpy>=1.24",
-    # Encodeurs des codecs servis au navigateur : JPEG-LS (sans perte, défaut) et
-    # JPEG 2000 (avec perte, ratio réglable). Absents, le plugin retombe sur le RLE puis sur
-    # l'envoi du fichier original — il fonctionne, mais sans le gain de bande passante.
+    # Encodeurs des codecs servis au navigateur : JPEG-LS (sans perte, défaut) via pyjpegls,
+    # JPEG 2000 (avec perte, ratio réglable) via pylibjpeg. ATTENTION : l'encodeur J2K de
+    # pydicom exige `pylibjpeg` ET `pylibjpeg-openjpeg` — le second seul ne suffit pas, et le
+    # mode « avec perte » retomberait silencieusement sur le sans perte.
+    # Encodeurs absents = repli sur RLE puis sur l'envoi du fichier original : le plugin
+    # fonctionne, mais sans le gain de bande passante.
     "pyjpegls>=1.2",
+    "pylibjpeg>=2.0",
     "pylibjpeg-openjpeg>=2.2",
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "pydicom>=3", "numpy>=1.24", "pyjpegls>=1.2", "pylibjpeg-openjpeg>=2.2"]
+test = [
+    "pytest",
+    "pydicom>=3",
+    "numpy>=1.24",
+    "pyjpegls>=1.2",
+    "pylibjpeg>=2.0",
+    "pylibjpeg-openjpeg>=2.2",
+]
 
 # Enregistrement du plugin auprès de Girder (entry point côté serveur).
 [project.entry-points."girder.plugin"]

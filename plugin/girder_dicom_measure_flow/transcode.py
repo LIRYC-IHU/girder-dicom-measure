@@ -86,6 +86,18 @@ def normalizeMode(value):
     return value if value in MODES else MODE_LOSSLESS
 
 
+# Un encodeur manquant est une ERREUR DE DÉPLOIEMENT, pas un cas courant : on la signale
+# (une seule fois par cause, sinon une série CT produirait une ligne par coupe) au lieu de
+# dégrader en silence — c'est précisément ce qui masquerait un `lossy` devenu `lossless`.
+_warned = set()
+
+
+def _warnOnce(key, message, *args):
+    if key not in _warned:
+        _warned.add(key)
+        logger.warning(message, *args)
+
+
 def _isEncodable(ds):
     """Le dataset décrit-il une image ré-encodable par les codecs utilisés ici ?
 
@@ -141,6 +153,11 @@ def _toLossless(ds):
             return uid
         except Exception as exc:
             logger.debug("[dmf] encodage %s indisponible/échoué : %r", uid, exc)
+    _warnOnce(
+        "lossless",
+        "[dmf] aucun encodeur sans perte disponible (JPEG-LS/J2K/RLE) : les pixels sont "
+        "envoyés NON COMPRESSÉS. Installer `pyjpegls`.",
+    )
     return None
 
 
@@ -151,7 +168,13 @@ def _toLossy(ds, ratio):
     try:
         _compress(ds, JPEG2000, j2k_cr=[float(ratio)])
     except Exception as exc:
-        logger.debug("[dmf] encodage J2K lossy échoué : %r", exc)
+        _warnOnce(
+            "lossy",
+            "[dmf] mode « avec perte » demandé mais l'encodeur JPEG 2000 est indisponible "
+            "(%r) — repli sur le sans perte. Installer `pylibjpeg` ET `pylibjpeg-openjpeg` "
+            "(le second seul ne suffit pas).",
+            exc,
+        )
         return None
     # Estampille DICOM de la perte (l'image N'EST PLUS l'original).
     ds.LossyImageCompression = "01"

@@ -38,7 +38,7 @@ jobs:
           python-version: '3.11'
       # Encodeurs utilisés par le transcodage des pixels (cf. transcode.py) : sans eux, les
       # tests de compression seraient silencieusement dégradés.
-      - run: pip install pydicom numpy pyjpegls pylibjpeg-openjpeg pytest
+      - run: pip install pydicom numpy pyjpegls pylibjpeg pylibjpeg-openjpeg pytest
       - run: python -m py_compile girder_dicom_measure_flow/*.py
       - run: python -m pytest -q
 
