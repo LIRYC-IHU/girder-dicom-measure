@@ -41,7 +41,10 @@ from pydicom.uid import (
     RLELossless,
 )
 
-logger = logging.getLogger(__name__)
+# Logger ENFANT de `girder` : Girder configure les handlers sur le logger « girder », et un
+# logger indépendant n'écrirait nulle part — c'est exactement ce qui a masqué l'échec du
+# transcodage en production.
+logger = logging.getLogger("girder.dicom_measure_flow")
 
 MODE_NONE = "none"
 MODE_LOSSLESS = "lossless"
@@ -53,8 +56,19 @@ MODES = (MODE_NONE, MODE_LOSSLESS, MODE_LOSSY)
 # Tous sont décodables par @cornerstonejs/dicom-image-loader.
 _LOSSLESS_CHAIN = (JPEGLSLossless, JPEG2000Lossless, RLELossless)
 
+# Codes de raison d'un envoi SANS transcodage (exposés en en-tête HTTP + journalisés).
+SKIP_DISABLED = "disabled"
+SKIP_NOT_DICOM = "not-dicom"
+SKIP_ALREADY_COMPRESSED = "already-compressed"
+SKIP_UNSUPPORTED = "unsupported-format"
+SKIP_TOO_LARGE = "too-large"
+SKIP_NO_GAIN = "no-gain"
+SKIP_ERROR = "error"
+
 # Version du format de sortie : incrémenter invalide le cache disque.
-CACHE_VERSION = 1
+# 2 : les entrées écrites par la v1 pouvaient mémoriser à tort « non transcodable » sur une
+#     erreur transitoire (lecture bornée par `core.filehandle_max_size`) — on les jette.
+CACHE_VERSION = 2
 
 # Libellés lisibles (exposés par l'API pour affichage dans le viewer).
 _TS_LABELS = {
@@ -122,18 +136,22 @@ def _isEncodable(ds):
 def inspect(fp):
     """Pré-contrôle SUR L'EN-TÊTE SEUL (pas de lecture des pixels).
 
-    Renvoie True si le fichier est un DICOM non compressé a priori transcodable. Permet
-    d'écarter à moindre coût les non-DICOM et les fichiers déjà compressés, qui sont le cas
-    fréquent, avant de charger les pixels en mémoire.
+    Renvoie `None` si le fichier est a priori transcodable, sinon un CODE DE RAISON (cf.
+    `SKIP_*`) — celui-ci remonte jusqu'à l'en-tête `X-Dmf-Transfer` de la réponse, pour que
+    « pourquoi ce fichier n'est-il pas compressé ? » ait une réponse sans fouiller les logs.
+    Permet aussi d'écarter à moindre coût les non-DICOM et les fichiers déjà compressés
+    (cas fréquent) avant de charger les pixels en mémoire.
     """
     try:
         ds = pydicom.dcmread(fp, stop_before_pixels=True, defer_size=1024)
     except Exception:
-        return False  # pas du DICOM
+        return SKIP_NOT_DICOM
     ts = getattr(ds.file_meta, "TransferSyntaxUID", None)
-    if ts is None or ts.is_encapsulated:
-        return False  # déjà compressé → on sert tel quel
-    return _isEncodable(ds)
+    if ts is None:
+        return SKIP_NOT_DICOM
+    if ts.is_encapsulated:
+        return SKIP_ALREADY_COMPRESSED  # déjà compressé → on sert tel quel
+    return None if _isEncodable(ds) else SKIP_UNSUPPORTED
 
 
 def _compress(ds, transferSyntax, **kwargs):
@@ -194,7 +212,7 @@ def transcode(data, mode=MODE_LOSSLESS, ratio=10.0, maxBytes=0):
         return None
     if maxBytes and len(data) > maxBytes:
         return None
-    if not inspect(io.BytesIO(data)):
+    if inspect(io.BytesIO(data)) is not None:
         return None
 
     try:

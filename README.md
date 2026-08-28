@@ -134,6 +134,20 @@ monochromes ; une image couleur retombe sur le mode sans perte. Un fichier **dé
 > En Docker, le cache est par défaut dans le `/tmp` du conteneur (perdu au redémarrage).
 > Pour le conserver, monter un volume et pointer `dmf.cache_dir` dessus.
 
+**Vérifier ce qui se passe réellement.** Chaque réponse de pixels porte un en-tête
+`X-Dmf-Transfer` :
+
+```bash
+curl -sI -H "Girder-Token: $TOKEN" "$GIRDER/api/v1/dmf/file/$FILE" | grep -i x-dmf-transfer
+# X-Dmf-Transfer: transcoded; mode=lossy
+# X-Dmf-Transfer: passthrough; reason=already-compressed
+```
+
+Raisons possibles d'un envoi sans compression : `already-compressed` (la source est déjà
+compressée — cas fréquent), `not-dicom`, `unsupported-format`, `too-large`, `no-gain`,
+`error` (voir alors les journaux Girder), `disabled`. Le premier accès à un examen encode et
+met en cache : compter quelques secondes pour une grosse boucle, instantané ensuite.
+
 **Chemin du viewer** (`dmf.viewer_path`, un seul segment) : la SPA a une base relative et
 déduit l'API de son URL, aucun rebuild n'est nécessaire. Penser à faire pointer la balise
 `<script>` du `sub_filter` vers ce même chemin. **Prend effet au redémarrage de Girder** (les

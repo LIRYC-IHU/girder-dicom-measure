@@ -74,8 +74,22 @@ doit pas le rendre impossible.
   - **Cache disque** obligatoire à l'usage (le J2K coûte ~1 s pour 69 frames) : `dmf.cache_dir`
     (défaut = tmp système), éviction LRU sous `dmf.cache_max_mb`, clé = (fichier, mode, ratio).
     Une entrée VIDE mémorise un « non transcodable » (évite de re-parser à chaque requête).
-  - Dépendances : `pydicom>=3` (`Dataset.compress`), `pyjpegls`, `pylibjpeg-openjpeg`. Absentes,
-    on dégrade vers RLE puis vers l'original — le plugin fonctionne, sans le gain.
+  - Dépendances : `pydicom>=3` (`Dataset.compress`), `pyjpegls`, **`pylibjpeg` ET**
+    `pylibjpeg-openjpeg` (l'encodeur J2K de pydicom exige les deux ; le second seul ne suffit
+    pas). Absentes, on dégrade vers RLE puis vers l'original — le plugin fonctionne, sans le gain.
+  - **Lire la source PAR BLOCS** (`streaming._readFile`) : `FileHandle.read()` sans argument
+    lève `GirderException` dès que la taille dépasse `core.filehandle_max_size` (16 Mo par
+    défaut) — c'est-à-dire pour à peu près toute boucle de scopie. Un `read()` non borné a
+    fait repartir les fichiers non compressés en production.
+  - **Un échec technique n'est jamais mémorisé** comme « non transcodable » : seules les
+    propriétés stables du fichier (déjà compressé, non-DICOM, format non géré, aucun gain)
+    créent une entrée négative. Sinon une panne passagère condamne le fichier pour toujours.
+  - **Journalisation via un logger enfant de `girder`** (`girder.dicom_measure_flow`) : un
+    `logging.getLogger(__name__)` indépendant n'écrit nulle part dans Girder — c'est ce qui a
+    rendu la panne ci-dessus invisible.
+  - Toute réponse porte **`X-Dmf-Transfer`** : `transcoded; mode=…` ou `passthrough; reason=…`
+    (`already-compressed`, `not-dicom`, `unsupported-format`, `too-large`, `no-gain`, `error`,
+    `disabled`). Premier réflexe de diagnostic, avant les logs.
 - **Plugin Girder `dicom_viewer` = OPTIONNEL, pas une dépendance.** La SPA parse le DICOM
   **côté client** (loader `wadouri` → tous les tags : PixelSpacing, UID, etc.) et n'utilise
   que des routes du **cœur** de Girder (`user/me`, `item/:id/files`, `file/:id/download`,
@@ -157,8 +171,9 @@ autres) : transparent pour la SPA, qui ne voit qu'une session.
   noir) ; n'y dessine pas les overlays d'annotations. GPU par défaut en usage réel.
 - **Transcodage synchrone** : le premier accès à un fichier non encore mis en cache encode
   dans le thread de la requête (verrou par clé → un seul encodage pour N lecteurs simultanés).
-  Acceptable aux tailles visées ; un déport en tâche de fond (Girder jobs) serait le prochain
-  pas si des séries très volumineuses arrivaient.
+  Mesuré : ~7,5 s pour une boucle RF de 54 frames 1104×1337 (159 Mo → 11,9 Mo en J2K 10:1) ;
+  les ouvertures suivantes sortent du cache. Un déport en tâche de fond (Girder jobs) serait
+  le prochain pas si des séries plus volumineuses arrivaient.
 - Le cache ne gère **pas les requêtes `Range`** (Cornerstone fait un GET simple).
 
 ## Échelle (px → mm) — IMPORTANT

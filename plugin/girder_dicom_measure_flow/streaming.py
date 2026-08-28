@@ -2,10 +2,15 @@
 
 Glue entre les réglages Girder, le cache disque et le transcodeur. La route
 `GET /api/v1/dmf/file/:id` passe par ici ; en cas d'inapplicabilité (mode `none`, fichier
-déjà compressé, non-DICOM, trop volumineux, erreur d'encodage) on retombe silencieusement
-sur le téléchargement Girder standard — le viewer reçoit alors l'original.
+déjà compressé, non-DICOM, trop volumineux, erreur d'encodage) on retombe sur le
+téléchargement Girder standard — le viewer reçoit alors l'original.
+
+Ce repli n'est PAS silencieux : toute réponse porte un en-tête `X-Dmf-Transfer` disant ce
+qui a été fait (`transcoded; mode=…`) ou pourquoi ça ne l'a pas été
+(`passthrough; reason=already-compressed|not-dicom|unsupported-format|too-large|no-gain|error|disabled`).
 """
 
+import io
 import logging
 import os
 import threading
@@ -15,11 +20,28 @@ from girder.models.file import File
 from girder.models.setting import Setting
 
 from .settings import PluginSettings
-from .transcode import MODE_NONE, TranscodeCache, cacheKey, normalizeMode, transcode
+from .transcode import (
+    MODE_NONE,
+    SKIP_DISABLED,
+    SKIP_ERROR,
+    SKIP_NO_GAIN,
+    SKIP_TOO_LARGE,
+    TranscodeCache,
+    cacheKey,
+    inspect,
+    normalizeMode,
+    transcode,
+)
 
-logger = logging.getLogger(__name__)
+# Enfant du logger « girder » : c'est lui qui porte les handlers configurés par Girder.
+logger = logging.getLogger("girder.dicom_measure_flow")
 
 _CHUNK = 1024 * 1024  # taille des morceaux relus depuis le cache
+# Lecture de la source par blocs : `FileHandle.read()` REFUSE toute lecture unique plus
+# grande que le réglage Girder `core.filehandle_max_size` (16 Mo par défaut) — soit à peu
+# près toutes les boucles de scopie. Un `read()` sans argument levait donc une exception,
+# et le fichier repartait non compressé.
+_READ_CHUNK = 8 * 1024 * 1024
 
 _cache = None
 _cacheParams = None
@@ -95,24 +117,52 @@ def _streamPath(path):
     return stream
 
 
+def _readFile(file):
+    """Contenu complet d'un fichier Girder, lu PAR BLOCS BORNÉS (cf. `_READ_CHUNK`)."""
+    buf = io.BytesIO()
+    with File().open(file) as fp:
+        while True:
+            chunk = fp.read(_READ_CHUNK)
+            if not chunk:
+                break
+            buf.write(chunk)
+    return buf.getvalue()
+
+
 def _produce(file, mode, ratio):
-    """Transcode le fichier ; renvoie les octets, ou b'' si non applicable."""
+    """Transcode le fichier.
+
+    Renvoie `(données, raison, mémorisable)` :
+      - `(bytes, "transcoded", True)` en cas de succès ;
+      - `(b"", <raison>, True)` si le fichier n'est PAS transcodable — propriété stable du
+        fichier, donc mémorisée pour ne pas le ré-analyser à chaque requête ;
+      - `(b"", "error", False)` sur échec technique (I/O, mémoire…). NE PAS mémoriser : une
+        panne passagère ne doit pas condamner ce fichier à repartir non compressé pour
+        toujours — c'est précisément ce qui s'est produit avec la lecture non bornée.
+    """
     maxBytes = _maxBytes()
     if maxBytes and (file.get("size") or 0) > maxBytes:
-        return b""
+        return b"", SKIP_TOO_LARGE, True
     try:
-        with File().open(file) as fp:
-            data = fp.read()
+        data = _readFile(file)
         result = transcode(data, mode, ratio, maxBytes=maxBytes)
-    except Exception as exc:
-        logger.warning("[dmf] transcodage impossible pour %s : %r", file.get("_id"), exc)
-        return b""
+    except Exception:
+        logger.exception("[dmf] transcodage impossible pour %s — fichier servi tel quel",
+                         file.get("name"))
+        return b"", SKIP_ERROR, False
     if result is None:
-        return b""
+        return b"", inspect(io.BytesIO(data)) or SKIP_NO_GAIN, True
     logger.info(
         "[dmf] %s transcodé en %s (%.2f:1)", file.get("name"), result.label, result.ratio
     )
-    return result.data
+    return result.data, "transcoded", True
+
+
+def _passthrough(file, reason):
+    """Fichier servi tel quel — la RAISON part dans la réponse (`X-Dmf-Transfer`), pour que
+    « pourquoi ce fichier n'est-il pas compressé ? » se lise dans l'onglet réseau."""
+    setResponseHeader("X-Dmf-Transfer", "passthrough; reason=%s" % reason)
+    return File().download(file)
 
 
 def serveFile(file):
@@ -122,26 +172,28 @@ def serveFile(file):
     """
     mode, ratio = compressionSettings()
     if mode == MODE_NONE:
-        return File().download(file)
+        return _passthrough(file, SKIP_DISABLED)
 
     store = cache()
     key = cacheKey(file["_id"], _revision(file), mode, ratio)
 
     known, path = store.lookup(key)
+    reason = "cached"
     if not known:
         # Verrou par clé : si plusieurs lecteurs ouvrent le même examen en même temps, un
         # seul encode (le transcodage est la partie coûteuse).
         with _keyLock(key):
             known, path = store.lookup(key)  # une requête concurrente a pu produire l'entrée
             if not known:
-                store.put(key, _produce(file, mode, ratio))
-                _known, path = store.lookup(key)
+                data, reason, cacheable = _produce(file, mode, ratio)
+                if cacheable:
+                    store.put(key, data)
+                    _known, path = store.lookup(key)
     if path is None:
-        # Entrée négative (non transcodable) ou cache indisponible → fichier original.
-        return File().download(file)
+        return _passthrough(file, reason if reason != "cached" else "not-transcodable")
 
     setResponseHeader("Content-Type", "application/dicom")
     setResponseHeader("Content-Length", str(os.path.getsize(path)))
-    setResponseHeader("X-Dmf-Compression", mode)
+    setResponseHeader("X-Dmf-Transfer", "transcoded; mode=%s" % mode)
     setContentDisposition(file["name"])
     return _streamPath(path)

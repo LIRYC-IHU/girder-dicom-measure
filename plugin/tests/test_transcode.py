@@ -122,6 +122,21 @@ def test_already_compressed_is_left_alone(uncompressed):
     assert T.transcode(_bytes(ds), T.MODE_LOSSLESS) is None
 
 
+def test_inspect_reports_why_a_file_is_skipped(uncompressed):
+    """La raison remonte jusqu'à l'en-tête `X-Dmf-Transfer` : elle doit être exacte."""
+    assert T.inspect(io.BytesIO(uncompressed)) is None  # transcodable
+
+    ds = pydicom.dcmread(io.BytesIO(uncompressed))
+    ds.compress(RLELossless, generate_instance_uid=False)
+    assert T.inspect(io.BytesIO(_bytes(ds))) == T.SKIP_ALREADY_COMPRESSED
+
+    assert T.inspect(io.BytesIO(b"pas du DICOM" * 100)) == T.SKIP_NOT_DICOM
+
+    ds = _dataset()
+    ds.BitsAllocated = 32  # hors du domaine des encodeurs utilisés
+    assert T.inspect(io.BytesIO(_bytes(ds))) == T.SKIP_UNSUPPORTED
+
+
 def test_mode_none_and_non_dicom_and_size_guard(uncompressed):
     assert T.transcode(uncompressed, T.MODE_NONE) is None
     assert T.transcode(b"pas du DICOM" * 100, T.MODE_LOSSLESS) is None
