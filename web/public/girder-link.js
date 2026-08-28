@@ -1,5 +1,6 @@
 /*
- * Intégration dans la vue item du client web Girder (injecté via l'index — cf. Dockerfile).
+ * Intégration dans la vue item du client web Girder (chargé par Girder lui-même, le plugin
+ * le déclarant via `registerPluginStaticContent`).
  * Sur une vue item DICOM, on ajoute :
  *   1) un panneau « Métadonnées DICOM » (façon plugin officiel dicom_viewer) ;
  *   2) un panneau « Mesures » (table des annotations : type, coupe, valeur, label, user, date) ;
@@ -10,16 +11,27 @@
 (function () {
   var cache = {}; // itemId -> { dicom: meta|null, ann: [...] }
   var fetching = null;
+  var viewerPath = null; // chemin du viewer, lu sur /api/v1/dmf/config
 
   var TYPE_LABEL = {
     distance: 'Distance', point: 'Position', 'level-h': 'Niveau H', 'level-v': 'Niveau V',
   };
 
-  // URL de base du viewer = celle de CE script (déduite de sa propre balise) → fonctionne
-  // quel que soit le chemin de montage / préfixe de reverse-proxy, sans config.
+  // Le script est servi depuis /plugin_static/dicom_measure_flow/, pas depuis le viewer :
+  // son URL ne dit rien du chemin de montage de la SPA. On lit donc `dmf.viewer_path` sur
+  // la route publique du plugin. Tant que la réponse n'est pas là, on n'injecte rien
+  // (plutôt qu'un lien qu'il faudrait corriger après coup).
   function viewerBase() {
-    var tag = document.querySelector('script[src*="girder-link.js"]');
-    return tag ? tag.src.replace(/girder-link\.js.*$/, '') : '/dmf/';
+    return viewerPath + '/';
+  }
+
+  function loadConfig() {
+    return fetch('/api/v1/dmf/config', { credentials: 'include' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (cfg) {
+        viewerPath = (cfg && cfg.viewerPath) || '/dmf';
+      })
+      .catch(function () { viewerPath = '/dmf'; });
   }
 
   function itemIdFromHash() {
@@ -123,6 +135,7 @@
   }
 
   function ensure() {
+    if (viewerPath === null) return; // config pas encore lue
     var itemId = itemIdFromHash();
     if (!itemId) return;
 
@@ -163,5 +176,5 @@
   window.addEventListener('hashchange', ensure);
   window.addEventListener('popstate', ensure);
   setInterval(ensure, 700); // filet de sécurité contre les ré-rendus du client Girder
-  ensure();
+  loadConfig().then(ensure);
 })();

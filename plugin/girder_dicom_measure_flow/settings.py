@@ -3,9 +3,8 @@
 `dmf.viewer_path` : chemin (même origine) sous lequel le plugin sert la SPA, p.ex. `/dmf`
 (défaut). Permet de changer l'adresse du viewer sans rebuild (la SPA a une base relative et
 déduit l'API de son URL). Recommandé : UN seul segment de chemin (cf. dérivation de l'API
-côté client). La modification prend effet au redémarrage de Girder. Si l'intégration vue item
-est injectée via le reverse-proxy (sub_filter) ou le Dockerfile, faire pointer la balise
-`<script src=".../girder-link.js">` vers ce même chemin.
+côté client). La modification prend effet au redémarrage de Girder. L'intégration vue item
+(`girder-link.js`) lit cette valeur sur `GET /api/v1/dmf/config` : rien d'autre à ajuster.
 """
 
 from girder.exceptions import ValidationException

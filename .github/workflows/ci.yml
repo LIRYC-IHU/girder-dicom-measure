@@ -39,3 +39,38 @@ jobs:
       - run: pip install pydicom pytest
       - run: python -m py_compile girder_dicom_measure_flow/*.py
       - run: python -m pytest -q
+
+  package:
+    name: Wheel (SPA embarquée)
+    runs-on: ubuntu-latest
+    needs: [web, plugin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # `make build` construit la SPA puis la copie dans plugin/.../web_dist, d'où
+      # le package-data la reprend. Sans cette étape le wheel s'installe quand même,
+      # mais Girder démarre sans viewer ni intégration vue item.
+      - run: npm ci
+        working-directory: web
+      - run: make build
+      - run: pip install build
+      - run: python -m build plugin
+      - name: Le wheel doit embarquer la SPA
+        run: |
+          whl=$(ls plugin/dist/*.whl)
+          echo "Vérification de $whl"
+          for f in web_dist/index.html web_dist/girder-link.js; do
+            unzip -l "$whl" | grep -q "$f" \
+              || { echo "::error::$f absent du wheel — la SPA n'a pas été construite avant le packaging"; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: girder-dicom-measure-flow-wheel
+          path: plugin/dist/*

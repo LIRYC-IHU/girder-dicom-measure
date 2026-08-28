@@ -21,9 +21,11 @@ from girder.exceptions import AccessException, RestException
 from girder.models.file import File
 from girder.models.folder import Folder
 from girder.models.item import Item
+from girder.models.setting import Setting
 
 from .dicom_metadata import processItem
 from .models import Annotation
+from .settings import PluginSettings
 
 
 def _folderItemIds(folder, user):
@@ -84,6 +86,7 @@ class DmfResource(Resource):
     def __init__(self):
         super().__init__()
         self.resourceName = "dmf"
+        self.route("GET", ("config",), self.getConfig)
         self.route("GET", ("user",), self.getUser)
         self.route("GET", ("item", ":id", "files"), self.getFiles)
         self.route("GET", ("item", ":id", "dicom"), self.getDicom)
@@ -95,6 +98,15 @@ class DmfResource(Resource):
         self.route("DELETE", ("annotation", ":key"), self.deleteAnnotation)
         self.route("GET", ("file", ":id"), self.downloadFile)
         self.route("POST", ("reprocess",), self.reprocess)
+
+    # --- Configuration publique --------------------------------------------
+
+    @access.public
+    @autoDescribeRoute(Description("Configuration publique du plugin (chemin du viewer)."))
+    def getConfig(self):
+        # Lu par `girder-link.js`, qui est servi depuis /plugin_static/... et ne peut donc
+        # plus déduire l'adresse du viewer de sa propre balise <script>.
+        return {"viewerPath": Setting().get(PluginSettings.VIEWER_PATH) or "/dmf"}
 
     # --- Lectures item -----------------------------------------------------
 

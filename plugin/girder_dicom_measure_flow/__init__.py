@@ -6,16 +6,20 @@ Rôles (cf. CLAUDE.md) :
   2. Exposition du champ `dicom` de l'item via l'API REST (le client lit l'ordre trié).
   3. Routes dédiées `/api/v1/dmf/*` (auth cookie) + service de la SPA sous le chemin
      configurable `dmf.viewer_path` (défaut `/dmf`).
+  4. Intégration dans la vue item du client web Girder (`girder-link.js`), déclarée via
+     `registerPluginStaticContent` : c'est Girder qui injecte la balise dans sa page, le
+     déploiement n'a plus à patcher son `index.html`.
 """
 
 import os
+from pathlib import Path
 
 import cherrypy
 from girder import events
 from girder.constants import AccessType
 from girder.models.item import Item
 from girder.models.setting import Setting
-from girder.plugin import GirderPlugin
+from girder.plugin import GirderPlugin, registerPluginStaticContent
 
 from .dicom_metadata import handleUploadedDicom
 from .models import migrateFromItemMetadata
@@ -24,6 +28,8 @@ from .settings import PluginSettings
 from .spa import SpaServer
 
 WEB_DIST = os.path.join(os.path.dirname(__file__), "web_dist")
+# Script d'intégration vue item, déposé à la racine du bundle par vite (web/public/).
+GIRDER_LINK = "girder-link.js"
 
 
 class DicomMeasureFlowPlugin(GirderPlugin):
@@ -55,4 +61,23 @@ class DicomMeasureFlowPlugin(GirderPlugin):
         else:
             cherrypy.log(
                 "[dicom_measure_flow] web_dist absent (%s) — lancer `make build`." % WEB_DIST
+            )
+
+        # 4 : intégration vue item. `registerPluginStaticContent` fait charger le script
+        # par le client web Girder (avec cache-busting), ce qui remplace l'injection
+        # manuelle d'une balise dans son index.html au moment de la construction de l'image.
+        # Le script est servi depuis /plugin_static/, pas depuis le chemin du viewer : il
+        # lit celui-ci sur `GET /api/v1/dmf/config`.
+        if os.path.isfile(os.path.join(WEB_DIST, GIRDER_LINK)):
+            registerPluginStaticContent(
+                plugin="dicom_measure_flow",
+                css=[],
+                js=["/" + GIRDER_LINK],
+                staticDir=Path(WEB_DIST),
+                tree=info["serverRoot"],
+            )
+        else:
+            cherrypy.log(
+                "[dicom_measure_flow] %s absent de web_dist — pas d'intégration vue item."
+                % GIRDER_LINK
             )
