@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "girder-dicom-measure-flow"
-version = "0.1.0"
+version = "0.2.0"
 description = "Plugin Girder : sert la SPA d'annotation DICOM et ajoute un point d'entrée dans la vue item"
 license = "Apache-2.0"
 # Girder 5 : le plugin utilise `registerPluginStaticContent` et cible l'API 5.x.
