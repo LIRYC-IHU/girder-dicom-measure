@@ -14,6 +14,9 @@ aux visites suivantes. Les mesures sont enregistrées dans Girder et **interroge
 - **Overlay** des mesures existantes à la réouverture ; les mesures des coupes voisines
   (jusqu'à ±3) s'affichent en transparence dégressive.
 - **Multi-coupes** et **multiframe** (cine) ; préchargement en arrière-plan → défilement fluide.
+- **Compression à la volée** des pixels avant envoi au navigateur (JPEG-LS sans perte par
+  défaut, JPEG 2000 avec perte au ratio souhaité en option) : une boucle de scopie non
+  compressée passe de ~18 Mo à ~9,6 Mo (sans perte) ou ~1,8 Mo (10:1).
 - Plein écran, navigation à la molette **ou** aux flèches, raccourcis clavier.
 - **Intégration Girder** : extraction automatique des métadonnées DICOM à l'upload, tri des
   coupes par numéro d'instance, panneaux « Métadonnées DICOM » et « Mesures » et lien
@@ -90,14 +93,57 @@ server {
 > La SPA et l'API doivent rester sur la **même origine** que Girder (cookie de session).
 > Le viewer reste accessible même sans le `sub_filter` (ouvrir directement `/dmf/?itemId=…`).
 
-**3. (Optionnel) Changer le chemin du viewer.** Réglage Girder `dmf.viewer_path` (défaut
-`/dmf`, un seul segment de chemin) — la SPA a une base relative et déduit l'API de son URL,
-donc aucun rebuild n'est nécessaire. Penser à faire pointer la balise `<script>` du
-`sub_filter` vers ce même chemin. Prend effet au redémarrage de Girder.
+**3. (Optionnel) Ajuster les réglages** — voir « Configuration » ci-dessous.
+
+## Configuration (administrateurs)
+
+Tout se règle depuis Girder : **console d'administration → Plugins → roue dentée** de la ligne
+« DICOM Measure Flow ». Les réglages restent également modifiables par l'API Girder
+`system/setting`.
+
+### Compression des pixels
+
+Les DICOM sont fréquemment stockés **non compressés** : une simple boucle de scopie
+(512 × 512, ~70 images) pèse alors ~18 Mo, et le réseau devient le facteur limitant. Le
+serveur recompresse donc les pixels avant de les envoyer, puis **met le résultat en cache**.
+
+| Mode | Codec | Effet |
+| ---- | ----- | ----- |
+| `lossless` *(défaut)* | JPEG-LS | pixels **strictement identiques** ; ~2 à 3:1 |
+| `lossy` | JPEG 2000 | vise `dmf.lossy_ratio` (**10:1** par défaut) ; pixels modifiés |
+| `none` | — | fichier original, sans transcodage ni cache |
+
+Le mode avec perte est signalé dans le viewer (ligne « Transport » du panneau d'infos) et
+estampillé dans le DICOM envoyé (`LossyImageCompression`). Il ne s'applique qu'aux images
+monochromes ; une image couleur retombe sur le mode sans perte. Un fichier **déjà compressé**
+à la source est toujours servi tel quel.
+
+> ⚠️ Sur un outil de mesure, une compression avec perte modifie les pixels sur lesquels le
+> reviewer mesure. Le mode sans perte est le défaut pour cette raison ; valider le rendu sur
+> vos propres images avant de passer en `lossy`.
+
+| Réglage | Défaut | Rôle |
+| ------- | ------ | ---- |
+| `dmf.compression` | `lossless` | `none` / `lossless` / `lossy` |
+| `dmf.lossy_ratio` | `10` | ratio visé en mode avec perte (2 à 50) |
+| `dmf.compression_max_mb` | `512` | au-delà, fichier envoyé tel quel (0 = pas de limite) |
+| `dmf.cache_dir` | *(tmp système)* | dossier du cache des fichiers transcodés |
+| `dmf.cache_max_mb` | `4096` | taille du cache, éviction LRU (0 = pas de limite) |
+| `dmf.viewer_path` | `/dmf` | chemin de montage de la SPA |
+
+> En Docker, le cache est par défaut dans le `/tmp` du conteneur (perdu au redémarrage).
+> Pour le conserver, monter un volume et pointer `dmf.cache_dir` dessus.
+
+**Chemin du viewer** (`dmf.viewer_path`, un seul segment) : la SPA a une base relative et
+déduit l'API de son URL, aucun rebuild n'est nécessaire. Penser à faire pointer la balise
+`<script>` du `sub_filter` vers ce même chemin. **Prend effet au redémarrage de Girder** (les
+autres réglages sont appliqués immédiatement).
+
+En ligne de commande :
 
 ```bash
 curl -H "Girder-Token: $TOKEN" -X PUT "$GIRDER/api/v1/system/setting" \
-  --data-urlencode "key=dmf.viewer_path" --data-urlencode 'value="/annotate"'
+  --data-urlencode "key=dmf.compression" --data-urlencode 'value="lossy"'
 ```
 
 ## Utilisation (reviewer)

@@ -12,11 +12,19 @@ license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = [
     "girder>=5",
-    "pydicom>=2.3",
+    # pydicom 3 : `Dataset.compress()` (transcodage avant envoi, cf. transcode.py) n'existe
+    # qu'à partir de cette version pour autre chose que le RLE.
+    "pydicom>=3",
+    "numpy>=1.24",
+    # Encodeurs des codecs servis au navigateur : JPEG-LS (sans perte, défaut) et
+    # JPEG 2000 (avec perte, ratio réglable). Absents, le plugin retombe sur le RLE puis sur
+    # l'envoi du fichier original — il fonctionne, mais sans le gain de bande passante.
+    "pyjpegls>=1.2",
+    "pylibjpeg-openjpeg>=2.2",
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "pydicom>=2.3"]
+test = ["pytest", "pydicom>=3", "numpy>=1.24", "pyjpegls>=1.2", "pylibjpeg-openjpeg>=2.2"]
 
 # Enregistrement du plugin auprès de Girder (entry point côté serveur).
 [project.entry-points."girder.plugin"]

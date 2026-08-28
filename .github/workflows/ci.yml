@@ -36,7 +36,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install pydicom pytest
+      # Encodeurs utilisés par le transcodage des pixels (cf. transcode.py) : sans eux, les
+      # tests de compression seraient silencieusement dégradés.
+      - run: pip install pydicom numpy pyjpegls pylibjpeg-openjpeg pytest
       - run: python -m py_compile girder_dicom_measure_flow/*.py
       - run: python -m pytest -q
 

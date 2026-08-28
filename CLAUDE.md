@@ -58,6 +58,24 @@ doit pas le rendre impossible.
   (`GET /api/v1/file/:id/download`) et Cornerstone le parse côté client via le loader
   `wadouri`. DICOMweb (Orthanc/dcm4chee) n'est envisagé qu'en cas de besoin volumique
   lourd ultérieur — il ajouterait un service + une 2e auth.
+- **Recompression à la volée avant envoi** (`transcode.py` + `streaming.py`) : les sources
+  sont souvent NON compressées (une boucle de scopie 512² × 70 frames = ~18 Mo). Le serveur
+  transcode donc les pixels avant de les streamer, selon le réglage `dmf.compression` :
+  `lossless` (défaut, **JPEG-LS** `1.2.840.10008.1.2.4.80`, ~2–3:1, pixels identiques) ou
+  `lossy` (**JPEG 2000** `…4.91` au ratio `dmf.lossy_ratio`, défaut 10:1) ; `none` désactive.
+  Décodage côté client déjà fourni par `@cornerstonejs/dicom-image-loader` (charls/openjpeg
+  wasm) → RIEN à changer dans la SPA.
+  - Le **SOPInstanceUID est conservé** (`generate_instance_uid=False`) : les mesures déjà
+    enregistrées référencent l'image par cet UID. En lossy, `LossyImageCompression*` est
+    estampillé et le viewer l'affiche (ligne « Transport » du panneau d'infos).
+  - Lossy réservé au **monochrome** (`SamplesPerPixel == 1`) ; une image couleur retombe sur
+    le sans perte. Fichier déjà compressé, non-DICOM, non encodable, plus gros que
+    `dmf.compression_max_mb`, ou sortie non plus petite → **fichier original servi tel quel**.
+  - **Cache disque** obligatoire à l'usage (le J2K coûte ~1 s pour 69 frames) : `dmf.cache_dir`
+    (défaut = tmp système), éviction LRU sous `dmf.cache_max_mb`, clé = (fichier, mode, ratio).
+    Une entrée VIDE mémorise un « non transcodable » (évite de re-parser à chaque requête).
+  - Dépendances : `pydicom>=3` (`Dataset.compress`), `pyjpegls`, `pylibjpeg-openjpeg`. Absentes,
+    on dégrade vers RLE puis vers l'original — le plugin fonctionne, sans le gain.
 - **Plugin Girder `dicom_viewer` = OPTIONNEL, pas une dépendance.** La SPA parse le DICOM
   **côté client** (loader `wadouri` → tous les tags : PixelSpacing, UID, etc.) et n'utilise
   que des routes du **cœur** de Girder (`user/me`, `item/:id/files`, `file/:id/download`,
@@ -86,6 +104,18 @@ autres) : transparent pour la SPA, qui ne voit qu'une session.
 - **Mode dev** (`vite dev`, cross-origin) : pas de cookie → `VITE_GIRDER_TOKEN` envoyé en
   header `Girder-Token` (accepté par les routes /dmf ; la vérif d'Origin est sautée quand
   l'auth est par token, qui est intrinsèquement non-CSRF).
+- **Page de configuration admin = une vraie page Girder** (console d'admin → Plugins → roue
+  dentée → `#plugins/dicom_measure_flow/config`), pas un écran de la SPA. Elle est enregistrée
+  depuis `girder-link.js` : Girder 5 charge les JS de plugin **avant** `initializeDefaultApp` et
+  publie tout son cœur sur `window.girder` (Backbone, `views.View`, `router`, `rest`,
+  `utilities.PluginUtils`) → on appelle `exposePluginConfig` + `router.route` et on étend
+  `girder.views.View` en JS nu, **sans reconstruire le client web de Girder** (la règle « pas de
+  vue Backbone dans notre pipeline de build » tient toujours : c'est du DOM/Backbone à l'exécution,
+  pas une source compilée par Girder). Données via `GET`/`PUT /api/v1/dmf/settings`
+  (`@access.admin(cookie=True)`, écriture sous garde d'Origin).
+  - `girder-link.js` doit être **idempotent** (`window.__dmfGirderLinkLoaded`) : il peut être
+    chargé deux fois si un déploiement injecte encore la balise `<script>` en plus de
+    `registerPluginStaticContent` — sans garde, la route d'admin serait enregistrée en double.
 - **Lien « Annoter »** dans la vue item Girder : un script (`/dmf/girder-link.js`) injecté
   dans l'index du client web Girder **au build Docker** ajoute un bouton flottant vers
   `/dmf/?itemId=<id>` (pur DOM, pas de rebuild du client Girder).
@@ -125,6 +155,11 @@ autres) : transparent pour la SPA, qui ne voit qu'une session.
   sur l'annotation.
 - **Rendu CPU** (`?cpu`) : échappatoire pour environnements headless (le readback WebGL ressort
   noir) ; n'y dessine pas les overlays d'annotations. GPU par défaut en usage réel.
+- **Transcodage synchrone** : le premier accès à un fichier non encore mis en cache encode
+  dans le thread de la requête (verrou par clé → un seul encodage pour N lecteurs simultanés).
+  Acceptable aux tailles visées ; un déport en tâche de fond (Girder jobs) serait le prochain
+  pas si des séries très volumineuses arrivaient.
+- Le cache ne gère **pas les requêtes `Range`** (Cornerstone fait un GET simple).
 
 ## Échelle (px → mm) — IMPORTANT
 
@@ -182,8 +217,8 @@ réécriture de liste globale.
   - SPA (`web/`) : `npm run lint` (ESLint flat config `eslint.config.js`), `npm run typecheck`,
     `npm test` (Vitest, jsdom), `npm run build`.
   - Plugin (`plugin/`) : `py_compile` + `pytest` (`tests/`, déps `pip install .[test]`).
-- **Tests** : côté plugin, les fonctions DICOM pures sont isolées dans `dicom_tags.py` (sans
-  dépendance Girder/Mongo) → testables avec pydicom seul. Côté SPA, helpers `measurements` et
+- **Tests** : côté plugin, les fonctions DICOM pures sont isolées dans `dicom_tags.py` et
+  `transcode.py` (sans dépendance Girder/Mongo) → testables avec pydicom seul. Côté SPA, helpers `measurements` et
   `store` (Cornerstone/girder mockés).
 - **Raccourcis outils** : **touche simple** (D/P/H/V), sans modificateur (évite le conflit
   ⌘H = masquer sur macOS) ; ignorés si modificateur pressé ou focus dans un champ.

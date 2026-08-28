@@ -260,3 +260,8 @@ html, body, #root {
   cursor: pointer;
   font-size: 0.9rem;
 }
+
+/* Signalement d'un transport AVEC PERTE dans le panneau d'infos DICOM. */
+.dicom-row.warn .dicom-val {
+  color: #ffcf70;
+}

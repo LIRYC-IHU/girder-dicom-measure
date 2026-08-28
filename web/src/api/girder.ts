@@ -47,9 +47,23 @@ interface DmfFile {
   name: string;
 }
 
+/** Mode de recompression des pixels appliqué par le serveur avant envoi. */
+export type CompressionMode = 'none' | 'lossless' | 'lossy';
+
+/** Configuration publique (`GET /dmf/config`) — lisible sans être authentifié. */
+export interface DmfConfig {
+  viewerPath: string;
+  compression: CompressionMode;
+  lossyRatio: number;
+}
+
+
 export const girder = {
   /** Identité de l'utilisateur courant (déjà au format des annotations). */
   me: () => req<MeasurementUser>('/user'),
+
+  /** Configuration publique (chemin du viewer, compression des pixels). */
+  config: () => req<DmfConfig>('/config'),
 
   /** URL des pixels d'un fichier (consommée par Cornerstone via wadouri:). */
   fileDownloadUrl: (fileId: string) =>

@@ -25,7 +25,9 @@ from girder.models.setting import Setting
 
 from .dicom_metadata import processItem
 from .models import Annotation
-from .settings import PluginSettings
+from .settings import DEFAULTS, PluginSettings
+from .streaming import compressionSettings, serveFile
+from .transcode import MODES
 
 
 def _folderItemIds(folder, user):
@@ -87,6 +89,8 @@ class DmfResource(Resource):
         super().__init__()
         self.resourceName = "dmf"
         self.route("GET", ("config",), self.getConfig)
+        self.route("GET", ("settings",), self.getSettings)
+        self.route("PUT", ("settings",), self.updateSettings)
         self.route("GET", ("user",), self.getUser)
         self.route("GET", ("item", ":id", "files"), self.getFiles)
         self.route("GET", ("item", ":id", "dicom"), self.getDicom)
@@ -102,11 +106,45 @@ class DmfResource(Resource):
     # --- Configuration publique --------------------------------------------
 
     @access.public
-    @autoDescribeRoute(Description("Configuration publique du plugin (chemin du viewer)."))
+    @autoDescribeRoute(
+        Description("Configuration publique du plugin (chemin du viewer, compression).")
+    )
     def getConfig(self):
         # Lu par `girder-link.js`, qui est servi depuis /plugin_static/... et ne peut donc
-        # plus déduire l'adresse du viewer de sa propre balise <script>.
-        return {"viewerPath": Setting().get(PluginSettings.VIEWER_PATH) or "/dmf"}
+        # plus déduire l'adresse du viewer de sa propre balise <script>. Le viewer y lit
+        # aussi le mode de compression, pour signaler une image transportée AVEC PERTE.
+        mode, ratio = compressionSettings()
+        return {
+            "viewerPath": Setting().get(PluginSettings.VIEWER_PATH) or "/dmf",
+            "compression": mode,
+            "lossyRatio": ratio,
+        }
+
+    # --- Réglages (administration) ----------------------------------------
+
+    @access.admin(cookie=True)
+    @autoDescribeRoute(Description("Réglages du plugin (administrateurs)."))
+    def getSettings(self):
+        setting = Setting()
+        values = {key: setting.get(key) for key in DEFAULTS}
+        return {"values": values, "defaults": dict(DEFAULTS), "compressionModes": list(MODES)}
+
+    @access.admin(cookie=True)
+    @autoDescribeRoute(
+        Description("Modifie les réglages du plugin (administrateurs).").jsonParam(
+            "settings", "Dictionnaire clé → valeur (clés `dmf.*`).",
+            requireObject=True, paramType="body",
+        )
+    )
+    def updateSettings(self, settings):
+        _checkSameOrigin()
+        setting = Setting()
+        unknown = [key for key in settings if key not in DEFAULTS]
+        if unknown:
+            raise RestException("Réglage inconnu : %s" % ", ".join(sorted(unknown)))
+        for key, value in settings.items():
+            setting.set(key, value)  # validation par les validateurs du plugin
+        return {key: setting.get(key) for key in DEFAULTS}
 
     # --- Lectures item -----------------------------------------------------
 
@@ -256,9 +294,10 @@ class DmfResource(Resource):
 
     @access.user(cookie=True)
     @autoDescribeRoute(
-        Description("Télécharge le fichier (pixels DICOM), avec contrôle d'accès.").modelParam(
-            "id", model=File, level=AccessType.READ
-        )
+        Description(
+            "Télécharge le fichier (pixels DICOM), avec contrôle d'accès. Les pixels non "
+            "compressés sont recompressés à la volée selon le réglage `dmf.compression`."
+        ).modelParam("id", model=File, level=AccessType.READ)
     )
     def downloadFile(self, file):
-        return File().download(file)
+        return serveFile(file)

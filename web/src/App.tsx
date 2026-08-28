@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { girder } from './api/girder';
+import { girder, type DmfConfig } from './api/girder';
 import { AnnotationStore, LocalAnnotationStore, type MeasurementStore } from './annotations/store';
 import { Viewer, type ActiveTool, type ViewerApi } from './viewer/Viewer';
 import type { DicomInfo } from './viewer/measurements';
@@ -41,6 +41,15 @@ function measurementSummary(m: Measurement): string {
   if (m.type === 'level-h' && m.geometry?.y != null) return `y = ${Math.round(m.geometry.y)}`;
   if (m.type === 'level-v' && m.geometry?.x != null) return `x = ${Math.round(m.geometry.x)}`;
   return '';
+}
+
+/** Libellé du transport des pixels (cf. réglage `dmf.compression` côté plugin). */
+function transportLabel(config: DmfConfig): string | null {
+  if (config.compression === 'lossy') {
+    return `JPEG 2000 avec perte (~${Math.round(config.lossyRatio)}:1)`;
+  }
+  if (config.compression === 'lossless') return 'JPEG-LS sans perte';
+  return null; // aucune recompression → rien à signaler
 }
 
 function formatTimestamp(iso: string): string {
@@ -109,6 +118,14 @@ export default function App() {
   const [dicomInfo, setDicomInfo] = useState<DicomInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [config, setConfig] = useState<DmfConfig | null>(null);
+
+  // Compression appliquée par le serveur : affichée dans le panneau d'infos (une image
+  // transportée AVEC PERTE doit être signalée à qui mesure dessus).
+  useEffect(() => {
+    if (standalone) return; // pas de plugin Girder en mode autonome
+    girder.config().then(setConfig).catch(() => undefined);
+  }, [standalone]);
 
   // Raccourcis de sélection d'outil (touche simple, sans modificateur).
   useEffect(() => {
@@ -231,6 +248,12 @@ export default function App() {
                   <span className="dicom-val">
                     {dicomInfo.columns} × {dicomInfo.rows}
                   </span>
+                </div>
+              )}
+              {config && transportLabel(config) && (
+                <div className={`dicom-row ${config.compression === 'lossy' ? 'warn' : ''}`}>
+                  <span className="dicom-key">Transport</span>
+                  <span className="dicom-val">{transportLabel(config)}</span>
                 </div>
               )}
               {!DICOM_FIELDS.some((f) => dicomInfo[f.key] != null) && (
