@@ -11,6 +11,7 @@ import numpy as np
 import pydicom
 import pytest
 from pydicom.dataset import Dataset, FileMetaDataset
+from pydicom.multival import MultiValue
 from pydicom.uid import (
     ExplicitVRLittleEndian,
     JPEG2000,
@@ -137,6 +138,81 @@ def test_inspect_reports_why_a_file_is_skipped(uncompressed):
     assert T.inspect(io.BytesIO(_bytes(ds))) == T.SKIP_UNSUPPORTED
 
 
+# --- Découpe frame par frame (affichage progressif) -------------------------
+
+
+def test_frame_layout_locates_each_frame(uncompressed):
+    layout = T.frameLayout(io.BytesIO(uncompressed))
+    assert layout is not None
+    assert layout.frames == 8
+    assert layout.frameSize == 64 * 64 * 2  # 64×64, 16 bits, monochrome
+
+    # L'offset annoncé doit vraiment tomber sur les pixels : on compare les octets extraits
+    # à la frame correspondante du tableau source.
+    source = pydicom.dcmread(io.BytesIO(uncompressed)).pixel_array
+    for index in (0, 3, 7):
+        raw = uncompressed[layout.offsetOf(index):layout.offsetOf(index) + layout.frameSize]
+        np.testing.assert_array_equal(
+            np.frombuffer(raw, dtype=np.uint16).reshape(64, 64), source[index]
+        )
+    # La dernière frame se termine exactement à la fin des pixels déclarés.
+    assert layout.offsetOf(8) == layout.valueOffset + 8 * layout.frameSize
+
+
+def test_frame_layout_declines_what_it_cannot_split():
+    """Mono-frame, déjà compressé, non-DICOM : le fichier entier reste le bon grain."""
+    assert T.frameLayout(io.BytesIO(_bytes(_dataset()))) is None  # une seule frame
+    assert T.frameLayout(io.BytesIO(b"pas du DICOM" * 100)) is None
+
+    ds = pydicom.dcmread(io.BytesIO(_bytes(_dataset(frames=4))))
+    ds.compress(RLELossless, generate_instance_uid=False)
+    assert T.frameLayout(io.BytesIO(_bytes(ds))) is None  # encapsulé
+
+
+def test_built_frame_is_a_faithful_single_frame_dicom(uncompressed):
+    layout = T.frameLayout(io.BytesIO(uncompressed))
+    source = pydicom.dcmread(io.BytesIO(uncompressed)).pixel_array
+    index = 5
+    raw = uncompressed[layout.offsetOf(index):layout.offsetOf(index) + layout.frameSize]
+
+    result = T.buildFrame(layout, raw, index, T.MODE_LOSSLESS)
+    assert result is not None
+    out = pydicom.dcmread(io.BytesIO(result.data))
+    assert int(out.NumberOfFrames) == 1
+    assert out.file_meta.TransferSyntaxUID == JPEGLSLossless
+    # Sans perte → les pixels de la frame servie sont ceux de la source.
+    np.testing.assert_array_equal(out.pixel_array, source[index])
+    # Même SOPInstanceUID : les mesures référencent l'image par cet UID + le n° de frame.
+    assert out.SOPInstanceUID == SOP_UID
+    # Une frame seule pèse une fraction de la boucle entière.
+    assert len(result.data) < len(uncompressed) / 4
+
+
+def test_built_frame_can_be_lossy(uncompressed):
+    layout = T.frameLayout(io.BytesIO(uncompressed))
+    raw = uncompressed[layout.offsetOf(0):layout.offsetOf(0) + layout.frameSize]
+    out = pydicom.dcmread(
+        io.BytesIO(T.buildFrame(layout, raw, 0, T.MODE_LOSSY, 10).data)
+    )
+    assert out.file_meta.TransferSyntaxUID == JPEG2000
+    assert out.LossyImageCompression == "01"
+
+
+def test_built_frame_trims_per_frame_attributes():
+    """Une instance qui annonce 1 frame ne doit pas décrire les N de la source."""
+    ds = _dataset(frames=4)
+    ds.FrameIncrementPointer = 0x00181065
+    ds.FrameTimeVector = [10.0, 20.0, 30.0, 40.0]
+    data = _bytes(ds)
+    layout = T.frameLayout(io.BytesIO(data))
+    raw = data[layout.offsetOf(2):layout.offsetOf(2) + layout.frameSize]
+
+    out = pydicom.dcmread(io.BytesIO(T.buildFrame(layout, raw, 2, T.MODE_LOSSLESS).data))
+    # pydicom réduit une valeur multiple à un scalaire quand il n'en reste qu'une.
+    kept = out.FrameTimeVector
+    assert [float(v) for v in (kept if isinstance(kept, MultiValue) else [kept])] == [30.0]
+
+
 def test_mode_none_and_non_dicom_and_size_guard(uncompressed):
     assert T.transcode(uncompressed, T.MODE_NONE) is None
     assert T.transcode(b"pas du DICOM" * 100, T.MODE_LOSSLESS) is None
@@ -164,6 +240,11 @@ def test_cache_key_depends_on_every_input():
     assert base != T.cacheKey("fid", "rev2", "lossy", 10)
     assert base != T.cacheKey("fid", "rev", "lossless", 10)
     assert base != T.cacheKey("fid", "rev", "lossy", 12)
+    # Le fichier entier et chacune de ses frames sont des entrées distinctes.
+    assert base != T.cacheKey("fid", "rev", "lossy", 10, frame=0)
+    assert T.cacheKey("fid", "rev", "lossy", 10, frame=0) != T.cacheKey(
+        "fid", "rev", "lossy", 10, frame=1
+    )
 
 
 def test_cache_roundtrip_and_negative_entry(tmp_path):

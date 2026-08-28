@@ -7,7 +7,7 @@
 // NB : l'API exacte d'init de @cornerstonejs/dicom-image-loader a bougé entre versions
 // majeures — adapter `dicomImageLoaderInit(...)` à la version réellement installée.
 
-import { init as coreInit, setUseCPURendering, imageLoader } from '@cornerstonejs/core';
+import { init as coreInit, setUseCPURendering } from '@cornerstonejs/core';
 import {
   init as toolsInit,
   addTool,
@@ -59,10 +59,14 @@ export function wadoUriImageId(fileDownloadUrl: string): string {
 }
 
 /**
- * Construit la liste d'imageIds du stack à partir des URLs de fichiers.
- *  - Plusieurs fichiers → un imageId par fichier (série de coupes ; cas CT).
- *  - Un seul fichier → on sonde `NumberOfFrames` (0028,0008) et, si multiframe, on
- *    développe en un imageId par frame (`&frame=N`, 1-based ; cas fluoroscopie cine).
+ * Construit la liste d'imageIds du stack à partir des URLs fournies.
+ *  - Plusieurs URLs → un imageId chacune. C'est le cas d'une série de coupes (CT) ET celui
+ *    d'une boucle multi-frame déjà développée par le serveur (une URL par frame) : chaque
+ *    image se charge et s'affiche indépendamment.
+ *  - Une seule URL → on sonde `NumberOfFrames` (0028,0008) et, si multiframe, on développe
+ *    en un imageId par frame (`&frame=N`, 1-based). Ce repli couvre les sources DÉJÀ
+ *    compressées, que le serveur ne découpe pas, et le mode autonome sans Girder. Il coûte
+ *    le téléchargement du fichier entier avant le premier affichage.
  * Le dataset est mis en cache par le loader → pas de double téléchargement au décodage.
  * Suppose Cornerstone initialisé (ensureCornerstoneInitialized).
  */
@@ -83,33 +87,4 @@ export async function buildStackImageIds(fileUrls: string[]): Promise<string[]> 
     // Sondage impossible → on retombe sur un imageId unique.
   }
   return bases;
-}
-
-/**
- * Précharge tout le stack en arrière-plan (cache image Cornerstone) pour un défilement
- * fluide. Charge depuis `startIndex` vers l'extérieur (slices voisines d'abord), avec une
- * concurrence limitée pour ne pas saturer les workers. `isAborted` permet d'annuler au
- * démontage. Fire-and-forget : ne bloque pas le rendu initial.
- */
-export function prefetchStack(
-  imageIds: string[],
-  startIndex: number,
-  isAborted: () => boolean,
-  concurrency = 6,
-): void {
-  // Ordre par distance croissante à la slice courante.
-  const order = imageIds
-    .map((_, i) => i)
-    .sort((a, b) => Math.abs(a - startIndex) - Math.abs(b - startIndex));
-
-  let next = 0;
-  const pump = (): void => {
-    if (isAborted() || next >= order.length) return;
-    const imageId = imageIds[order[next++]];
-    imageLoader
-      .loadAndCacheImage(imageId)
-      .catch(() => undefined)
-      .finally(pump);
-  };
-  for (let k = 0; k < Math.min(concurrency, order.length); k++) pump();
 }

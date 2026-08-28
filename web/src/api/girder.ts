@@ -45,6 +45,10 @@ async function req<T = unknown>(path: string, opts: RequestInit = {}): Promise<T
 interface DmfFile {
   id: string;
   name: string;
+  /** Frames adressables séparément. 1 = télécharger le fichier entier (cas courant) ;
+   *  > 1 = boucle multi-frame livrée frame par frame (le serveur transcode à la demande,
+   *  la première image s'affiche sans attendre l'encodage de toute la boucle). */
+  frames?: number;
 }
 
 /** Mode de recompression des pixels appliqué par le serveur avant envoi. */
@@ -69,10 +73,22 @@ export const girder = {
   fileDownloadUrl: (fileId: string) =>
     `${API}/file/${fileId}${girderToken ? `?token=${girderToken}` : ''}`,
 
-  /** URLs des fichiers DANS L'ORDRE DES COUPES (tri serveur, repli côté serveur si absent). */
+  /** URL d'UNE frame, servie comme un DICOM mono-frame indépendant. */
+  frameDownloadUrl: (fileId: string, index: number) =>
+    `${API}/file/${fileId}/frame/${index}${girderToken ? `?token=${girderToken}` : ''}`,
+
+  /**
+   * URLs du stack, DANS L'ORDRE DES COUPES (tri serveur, repli côté serveur si absent).
+   * Une boucle multi-frame est développée ici en une URL par frame : chacune se télécharge
+   * et s'affiche indépendamment, au lieu d'attendre le fichier entier.
+   */
   async orderedFileUrls(itemId: string): Promise<string[]> {
     const files = await req<DmfFile[]>(`/item/${itemId}/files`);
-    return files.map((f) => girder.fileDownloadUrl(f.id));
+    return files.flatMap((f) =>
+      (f.frames ?? 1) > 1
+        ? Array.from({ length: f.frames! }, (_, i) => girder.frameDownloadUrl(f.id, i))
+        : [girder.fileDownloadUrl(f.id)],
+    );
   },
 
   /** Mesures d'un item (collection `dmf_annotation`). */

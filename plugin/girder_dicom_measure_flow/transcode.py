@@ -27,10 +27,12 @@ estampille en revanche `LossyImageCompression`/`Ratio`/`Method` (le viewer l'aff
 Ce module n'importe NI Girder NI Mongo → testable avec pydicom seul (cf. tests/).
 """
 
+import copy
 import hashlib
 import io
 import logging
 import os
+import struct
 import tempfile
 
 import pydicom
@@ -68,7 +70,12 @@ SKIP_ERROR = "error"
 # Version du format de sortie : incrémenter invalide le cache disque.
 # 2 : les entrées écrites par la v1 pouvaient mémoriser à tort « non transcodable » sur une
 #     erreur transitoire (lecture bornée par `core.filehandle_max_size`) — on les jette.
-CACHE_VERSION = 2
+# 3 : la clé porte désormais un numéro de frame (livraison frame par frame).
+CACHE_VERSION = 3
+
+PIXEL_DATA_TAG = (0x7FE0, 0x0010)
+# VR à en-tête long (12 octets : tag + VR + réservé + longueur sur 4 octets).
+_LONG_VR = (b"OB", b"OW", b"OF", b"OD", b"OL", b"OV", b"SQ", b"UT", b"UN", b"UC", b"UR")
 
 # Libellés lisibles (exposés par l'API pour affichage dans le viewer).
 _TS_LABELS = {
@@ -201,6 +208,118 @@ def _toLossy(ds, ratio):
     return JPEG2000
 
 
+class FrameLayout:
+    """Ce qu'il faut savoir pour extraire UNE frame sans charger le reste du fichier.
+
+    Uniquement pour une source NON compressée : les frames y sont contiguës et de taille
+    fixe, donc l'octet de départ de la frame `n` se calcule. (Une source encapsulée
+    demanderait de parcourir les fragments ; elle est déjà compressée, donc hors sujet ici.)
+    """
+
+    def __init__(self, dataset, valueOffset, frameSize, frames):
+        self.dataset = dataset  # en-tête seul (lu avec stop_before_pixels)
+        self.valueOffset = valueOffset
+        self.frameSize = frameSize
+        self.frames = frames
+
+    def offsetOf(self, index):
+        return self.valueOffset + index * self.frameSize
+
+
+def _readPixelDataHeader(fp, implicitVR):
+    """`(offset de la valeur, longueur déclarée)` de PixelData, `fp` étant positionné sur
+    l'élément (c'est là que `dcmread(stop_before_pixels=True)` laisse le flux)."""
+    start = fp.tell()
+    raw = fp.read(12)
+    if len(raw) < 8:
+        return None
+    group, element = struct.unpack("<HH", raw[:4])
+    if (group, element) != PIXEL_DATA_TAG:
+        return None
+    if implicitVR:
+        return start + 8, struct.unpack("<I", raw[4:8])[0]
+    if raw[4:6] in _LONG_VR:
+        if len(raw) < 12:
+            return None
+        return start + 12, struct.unpack("<I", raw[8:12])[0]
+    return start + 8, struct.unpack("<H", raw[6:8])[0]
+
+
+def frameLayout(fp):
+    """Analyse l'en-tête d'une source et renvoie un `FrameLayout`, ou None si la livraison
+    frame par frame ne s'applique pas (non-DICOM, déjà compressé, format non géré, ou une
+    seule frame — auquel cas le fichier entier reste le bon grain)."""
+    try:
+        ds = pydicom.dcmread(fp, stop_before_pixels=True)
+    except Exception:
+        return None
+    ts = getattr(ds.file_meta, "TransferSyntaxUID", None)
+    if ts is None or ts.is_encapsulated or not _isEncodable(ds):
+        return None
+    frames = int(ds.get("NumberOfFrames") or 1)
+    if frames < 2:
+        return None
+
+    header = _readPixelDataHeader(fp, bool(ts.is_implicit_VR))
+    if header is None:
+        return None
+    valueOffset, declaredLength = header
+    frameSize = (
+        int(ds.Rows)
+        * int(ds.Columns)
+        * int(ds.get("SamplesPerPixel") or 1)
+        * (int(ds.BitsAllocated) // 8)
+    )
+    # Incohérence (bits non multiples d'octets, longueur indéfinie, padding exotique) :
+    # on s'abstient plutôt que de découper au mauvais endroit.
+    if frameSize <= 0 or declaredLength != frameSize * frames:
+        return None
+
+    # Le dataset ne sert plus que d'en-tête, recopié pour chaque frame. On le détache de son
+    # flux source, sinon pydicom émet un avertissement à CHAQUE copie (le flux Girder n'est
+    # pas sérialisable) — 54 lignes de bruit par boucle, dans lesquelles un vrai message se
+    # perdrait.
+    try:
+        ds.buffer = None
+    except Exception:  # attribut absent d'une autre version de pydicom
+        pass
+    return FrameLayout(ds, valueOffset, frameSize, frames)
+
+
+def buildFrame(layout, frameBytes, index, mode=MODE_LOSSLESS, ratio=10.0):
+    """DICOM MONO-FRAME transcodé, à partir de l'en-tête et des octets bruts d'une frame.
+
+    Le SOPInstanceUID reste celui de la source (comme pour le fichier entier) : les mesures
+    déjà enregistrées référencent l'image par cet UID, et le numéro de frame séparément.
+    """
+    ds = copy.deepcopy(layout.dataset)
+    ds.NumberOfFrames = 1
+    # Attributs indexés par frame : on ne garde que celui de la frame servie, sinon
+    # l'instance annoncerait 1 frame tout en décrivant les 54.
+    if "FrameTimeVector" in ds:
+        times = list(ds.FrameTimeVector or [])
+        if len(times) > index:
+            ds.FrameTimeVector = [times[index]]
+    if "PerFrameFunctionalGroupsSequence" in ds:
+        groups = list(ds.PerFrameFunctionalGroupsSequence)
+        if len(groups) > index:
+            ds.PerFrameFunctionalGroupsSequence = [groups[index]]
+    ds.PixelData = frameBytes
+
+    uid = _toLossy(ds, ratio) if normalizeMode(mode) == MODE_LOSSY else None
+    if uid is None:
+        uid = _toLossless(ds)
+    if uid is None:
+        return None
+    try:
+        buf = io.BytesIO()
+        ds.save_as(buf, enforce_file_format=True)
+    except Exception as exc:
+        logger.warning("[dmf] sérialisation de la frame %d échouée : %r", index, exc)
+        return None
+    return Transcoded(buf.getvalue(), uid, len(frameBytes))
+
+
 def transcode(data, mode=MODE_LOSSLESS, ratio=10.0, maxBytes=0):
     """Transcode un fichier DICOM complet (bytes) ; None si non applicable.
 
@@ -250,11 +369,19 @@ def transcode(data, mode=MODE_LOSSLESS, ratio=10.0, maxBytes=0):
 # re-parser l'en-tête d'un fichier déjà compressé à chaque requête.
 
 
-def cacheKey(fileId, revision, mode, ratio):
+def cacheKey(fileId, revision, mode, ratio, frame=None):
     """Clé stable d'une sortie transcodée. `revision` distingue deux contenus d'un même id
-    (re-upload) — en pratique le sha512 ou la taille du fichier Girder."""
+    (re-upload) — en pratique le sha512 ou la taille du fichier Girder. `frame` vaut None
+    pour le fichier entier, ou l'index de la frame servie seule."""
     raw = "|".join(
-        [str(CACHE_VERSION), str(fileId), str(revision), normalizeMode(mode), "%.3f" % float(ratio)]
+        [
+            str(CACHE_VERSION),
+            str(fileId),
+            str(revision),
+            normalizeMode(mode),
+            "%.3f" % float(ratio),
+            "all" if frame is None else str(int(frame)),
+        ]
     )
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 

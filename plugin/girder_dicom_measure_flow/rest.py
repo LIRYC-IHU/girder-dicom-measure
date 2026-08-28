@@ -26,7 +26,7 @@ from girder.models.setting import Setting
 from .dicom_metadata import processItem
 from .models import Annotation
 from .settings import DEFAULTS, PluginSettings
-from .streaming import compressionSettings, serveFile
+from .streaming import compressionSettings, frameCount, serveFile, serveFrame
 from .transcode import MODES
 
 
@@ -101,6 +101,7 @@ class DmfResource(Resource):
         self.route("PUT", ("annotation", ":key"), self.updateAnnotation)
         self.route("DELETE", ("annotation", ":key"), self.deleteAnnotation)
         self.route("GET", ("file", ":id"), self.downloadFile)
+        self.route("GET", ("file", ":id", "frame", ":index"), self.downloadFrame)
         self.route("POST", ("reprocess",), self.reprocess)
 
     # --- Configuration publique --------------------------------------------
@@ -162,8 +163,27 @@ class DmfResource(Resource):
     def getFiles(self, item):
         ordered = (item.get("dicom") or {}).get("files")
         if ordered:
-            return [{"id": str(f["_id"]), "name": f.get("name")} for f in ordered]
-        return [{"id": str(f["_id"]), "name": f["name"]} for f in Item().childFiles(item)]
+            docs = [(str(f["_id"]), f.get("name"), (f.get("dicom") or {})) for f in ordered]
+        else:
+            docs = [(str(f["_id"]), f["name"], {}) for f in Item().childFiles(item)]
+
+        # `frames` > 1 → le client demandera une URL par frame (affichage progressif) plutôt
+        # que le fichier entier. Sonder l'en-tête coûte quelques Ko, mais le faire pour les
+        # 100+ coupes d'un CT serait du gâchis : on ne sonde que ce qui peut être multi-frame,
+        # c'est-à-dire un `NumberOfFrames` déjà connu ≥ 2, ou un item d'un seul fichier dont
+        # on ne sait rien (item antérieur au plugin → `POST /dmf/reprocess` renseigne le tag).
+        def frames(fileId, meta):
+            known = meta.get("NumberOfFrames")
+            if known is None and len(docs) > 1:
+                return 1
+            if known is not None and int(known or 1) < 2:
+                return 1
+            return frameCount(File().load(fileId, force=True))
+
+        return [
+            {"id": fileId, "name": name, "frames": frames(fileId, meta)}
+            for fileId, name, meta in docs
+        ]
 
     @access.user(cookie=True)
     @autoDescribeRoute(
@@ -301,3 +321,21 @@ class DmfResource(Resource):
     )
     def downloadFile(self, file):
         return serveFile(file)
+
+    @access.user(cookie=True)
+    @autoDescribeRoute(
+        Description(
+            "Télécharge UNE frame d'un fichier multi-frame, sous forme de DICOM mono-frame "
+            "transcodé. Permet d'afficher la première image sans attendre l'encodage de "
+            "toute la boucle. Le nombre de frames adressables est donné par "
+            "`GET /dmf/item/:id/files` (champ `frames`)."
+        )
+        .modelParam("id", model=File, level=AccessType.READ)
+        .param("index", "Index de la frame, à partir de 0.", paramType="path", dataType="integer")
+    )
+    def downloadFrame(self, file, index):
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            raise RestException("Index de frame invalide.", code=400)
+        return serveFrame(file, index)

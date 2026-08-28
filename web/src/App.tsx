@@ -177,7 +177,14 @@ export default function App() {
   }, [standalone, itemId]);
 
   if (error) return <div className="error">{error}</div>;
-  if (!ready) return <div className="error">Chargement…</div>;
+  if (!ready) {
+    return (
+      <div className="loading" role="status">
+        <div className="spinner" aria-hidden="true" />
+        <span>Chargement de l'examen…</span>
+      </div>
+    );
+  }
 
   return (
     <div className="app">

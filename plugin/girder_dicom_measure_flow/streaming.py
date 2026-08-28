@@ -8,6 +8,13 @@ téléchargement Girder standard — le viewer reçoit alors l'original.
 Ce repli n'est PAS silencieux : toute réponse porte un en-tête `X-Dmf-Transfer` disant ce
 qui a été fait (`transcoded; mode=…`) ou pourquoi ça ne l'a pas été
 (`passthrough; reason=already-compressed|not-dicom|unsupported-format|too-large|no-gain|error|disabled`).
+
+LIVRAISON FRAME PAR FRAME : une boucle de scopie non compressée est un seul fichier de
+plusieurs dizaines (voire centaines) de Mo, dont l'encodage complet prend des secondes — et
+le loader du client n'affiche rien avant le dernier octet. `frameCount` + `serveFrame`
+permettent donc de servir chaque frame comme un DICOM mono-frame indépendant : la première
+image s'affiche en ~0,15 s, le reste arrive en tâche de fond. Seuls les octets de la frame
+demandée sont lus dans la source (cf. `transcode.frameLayout`).
 """
 
 import io
@@ -16,16 +23,20 @@ import os
 import threading
 
 from girder.api.rest import setContentDisposition, setResponseHeader
+from girder.exceptions import RestException
 from girder.models.file import File
 from girder.models.setting import Setting
 
 from .settings import PluginSettings
 from .transcode import (
     MODE_NONE,
+    buildFrame,
+    frameLayout,
     SKIP_DISABLED,
     SKIP_ERROR,
     SKIP_NO_GAIN,
     SKIP_TOO_LARGE,
+    SKIP_UNSUPPORTED,
     TranscodeCache,
     cacheKey,
     inspect,
@@ -117,6 +128,37 @@ def _streamPath(path):
     return stream
 
 
+def _readExactly(fp, size):
+    """`size` octets à la position courante, en respectant le plafond de lecture Girder."""
+    buf = io.BytesIO()
+    while buf.tell() < size:
+        chunk = fp.read(min(_READ_CHUNK, size - buf.tell()))
+        if not chunk:
+            break
+        buf.write(chunk)
+    return buf.getvalue()
+
+
+def frameCount(file):
+    """Nombre de frames LIVRABLES SÉPARÉMENT pour ce fichier (1 = servir le fichier entier).
+
+    C'est la valeur annoncée au client par `GET /dmf/item/:id/files` : il construit une URL
+    par frame quand elle dépasse 1. On ne renvoie > 1 que si la découpe est réellement
+    possible (source non compressée, format géré) ET que le transcodage est actif — sinon
+    découper coûterait plus qu'il ne rapporte.
+    """
+    mode, _ratio = compressionSettings()
+    if mode == MODE_NONE:
+        return 1
+    try:
+        with File().open(file) as fp:
+            layout = frameLayout(fp)
+    except Exception:
+        logger.exception("[dmf] lecture de l'en-tête impossible pour %s", file.get("name"))
+        return 1
+    return layout.frames if layout else 1
+
+
 def _readFile(file):
     """Contenu complet d'un fichier Girder, lu PAR BLOCS BORNÉS (cf. `_READ_CHUNK`)."""
     buf = io.BytesIO()
@@ -156,6 +198,58 @@ def _produce(file, mode, ratio):
         "[dmf] %s transcodé en %s (%.2f:1)", file.get("name"), result.label, result.ratio
     )
     return result.data, "transcoded", True
+
+
+def _produceFrame(file, index, mode, ratio):
+    """Encode UNE frame. Seuls les octets de cette frame sont lus dans la source — c'est ce
+    qui rend l'affichage progressif possible : ~0,15 s au lieu des secondes qu'exige la
+    boucle entière."""
+    try:
+        with File().open(file) as fp:
+            layout = frameLayout(fp)
+            if layout is None or not 0 <= index < layout.frames:
+                return b"", SKIP_UNSUPPORTED, True
+            fp.seek(layout.offsetOf(index))
+            frameBytes = _readExactly(fp, layout.frameSize)
+        if len(frameBytes) != layout.frameSize:
+            return b"", SKIP_ERROR, False  # source tronquée : ne pas mémoriser
+        result = buildFrame(layout, frameBytes, index, mode, ratio)
+    except Exception:
+        logger.exception("[dmf] frame %d de %s : encodage impossible", index, file.get("name"))
+        return b"", SKIP_ERROR, False
+    if result is None:
+        return b"", SKIP_NO_GAIN, True
+    return result.data, "transcoded", True
+
+
+def serveFrame(file, index):
+    """Réponse en flux pour UNE frame d'un fichier multi-frame (cf. `frameCount`)."""
+    mode, ratio = compressionSettings()
+    store = cache()
+    key = cacheKey(file["_id"], _revision(file), mode, ratio, frame=index)
+
+    known, path = store.lookup(key)
+    reason = "cached"
+    if not known:
+        with _keyLock(key):
+            known, path = store.lookup(key)
+            if not known:
+                data, reason, cacheable = _produceFrame(file, index, mode, ratio)
+                if cacheable:
+                    store.put(key, data)
+                    _known, path = store.lookup(key)
+    if path is None:
+        raise RestException(
+            "Frame %d indisponible pour ce fichier (%s)."
+            % (index, reason if reason != "cached" else SKIP_UNSUPPORTED),
+            code=404,
+        )
+
+    setResponseHeader("Content-Type", "application/dicom")
+    setResponseHeader("Content-Length", str(os.path.getsize(path)))
+    setResponseHeader("X-Dmf-Transfer", "transcoded; mode=%s; frame=%d" % (mode, index))
+    setContentDisposition("%s-%d.dcm" % (file["name"], index))
+    return _streamPath(path)
 
 
 def _passthrough(file, reason):

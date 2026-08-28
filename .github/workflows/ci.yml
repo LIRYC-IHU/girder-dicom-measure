@@ -3,6 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+    # Sans ce filtre, un push de tag ne déclenche rien : `branches` seul ignore les tags,
+    # et le job `release` ci-dessous ne s'exécuterait jamais.
+    tags: ['v*']
   pull_request:
 
 jobs:
@@ -76,3 +79,33 @@ jobs:
         with:
           name: girder-dicom-measure-flow-wheel
           path: plugin/dist/*
+
+  release:
+    name: Publication du wheel sur la release
+    # Uniquement sur tag `vX.Y.Z` : le wheel publié devient l'artefact que consomme le
+    # déploiement (cf. girder-define-pfa/docker/girder/Dockerfile.prod).
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: girder-dicom-measure-flow-wheel
+          path: dist
+      # L'URL de téléchargement contient la version : un tag qui ne correspond pas à
+      # `plugin/pyproject.toml` publierait un asset introuvable par le déploiement.
+      - name: Le tag doit correspondre à la version du wheel
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          whl=$(ls dist/*.whl)
+          version=$(basename "$whl" | cut -d- -f2)
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME != version du wheel ($version) — bumper plugin/pyproject.toml avant de taguer"
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME == version $version"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

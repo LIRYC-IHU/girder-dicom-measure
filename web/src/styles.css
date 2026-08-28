@@ -240,6 +240,51 @@ html, body, #root {
 
 .error { color: #ff8080; padding: 1rem; }
 
+/* --- Attente ---------------------------------------------------------------
+   Le premier accès à un examen n'est plus instantané : le serveur transcode les pixels
+   avant de les envoyer (quelques secondes sur une grosse boucle, puis mise en cache).
+   Sans indicateur, l'écran noir se lit comme une panne. */
+.loading,
+.loading-overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.9rem;
+  color: #aaa;
+  font-size: 0.9rem;
+}
+
+.loading {
+  height: 100%;
+}
+
+.loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  background: #111;
+  pointer-events: none; /* n'intercepte rien : le viewport reste utilisable dès l'affichage */
+}
+
+.spinner {
+  width: 2rem;
+  height: 2rem;
+  border: 3px solid #333;
+  border-top-color: #4f7fd6;
+  border-radius: 50%;
+  animation: dmf-spin 0.8s linear infinite;
+}
+
+@keyframes dmf-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Mouvement réduit : on garde une rotation, mais lente et non clignotante. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 2.4s; }
+}
+
 /* Bannière d'échec de sauvegarde (non bloquante, fermable) */
 .save-error {
   display: flex;

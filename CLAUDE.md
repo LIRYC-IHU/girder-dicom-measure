@@ -71,6 +71,28 @@ doit pas le rendre impossible.
   - Lossy réservé au **monochrome** (`SamplesPerPixel == 1`) ; une image couleur retombe sur
     le sans perte. Fichier déjà compressé, non-DICOM, non encodable, plus gros que
     `dmf.compression_max_mb`, ou sortie non plus petite → **fichier original servi tel quel**.
+  - **Livraison FRAME PAR FRAME** pour les sources multi-frame non compressées
+    (`transcode.frameLayout`/`buildFrame`, `streaming.frameCount`/`serveFrame`, route
+    `GET /dmf/file/:id/frame/:index`) : le loader `wadouri` ne parse RIEN avant le dernier
+    octet (`xhrRequest` ne résout qu'à `readyState === 4`), donc un flux chunké sur un fichier
+    unique n'afficherait rien plus tôt. Chaque frame devient donc un DICOM mono-frame
+    indépendant → première image en ~0,15 s au lieu de ~7,5 s, pour +0,8 % d'octets (l'en-tête
+    répété). `GET /dmf/item/:id/files` annonce `frames` ; > 1 → le client construit une URL par
+    frame, 1 → il télécharge le fichier entier (comportement historique, conservé pour les
+    sources DÉJÀ compressées, que l'on ne découpe pas).
+    - Seuls les octets de la frame demandée sont lus dans la source : les pixels non compressés
+      sont contigus, donc l'offset se calcule (`FrameLayout.offsetOf`) après avoir localisé la
+      valeur de PixelData — `dcmread(stop_before_pixels=True)` laisse le flux pile sur
+      l'élément, il reste à décoder son en-tête (8 ou 12 octets selon la VR). Sans ça, chaque
+      frame relirait les 159 Mo et le préchargement ferait exploser la mémoire.
+    - Les attributs indexés par frame (`FrameTimeVector`, `PerFrameFunctionalGroupsSequence`)
+      sont réduits à la frame servie ; le SOPInstanceUID reste celui de la source.
+    - Le RESTE du stack continue d'être préchargé en mémoire derrière la première image
+      (`viewer/prefetch.ts`, cache image Cornerstone plafonné à 3 Go par défaut → aucune
+      éviction aux tailles visées) : une fois chargé, le défilement ne touche plus le réseau.
+      L'ordre est recalculé à chaque créneau libéré autour de la coupe RÉELLEMENT affichée —
+      avec un ordre figé, un utilisateur sautant au milieu pendant les quelques secondes de
+      préchargement attendrait ses voisines, en fin de file.
   - **Cache disque** obligatoire à l'usage (le J2K coûte ~1 s pour 69 frames) : `dmf.cache_dir`
     (défaut = tmp système), éviction LRU sous `dmf.cache_max_mb`, clé = (fichier, mode, ratio).
     Une entrée VIDE mémorise un « non transcodable » (évite de re-parser à chaque requête).
@@ -169,11 +191,10 @@ autres) : transparent pour la SPA, qui ne voit qu'une session.
   sur l'annotation.
 - **Rendu CPU** (`?cpu`) : échappatoire pour environnements headless (le readback WebGL ressort
   noir) ; n'y dessine pas les overlays d'annotations. GPU par défaut en usage réel.
-- **Transcodage synchrone** : le premier accès à un fichier non encore mis en cache encode
-  dans le thread de la requête (verrou par clé → un seul encodage pour N lecteurs simultanés).
-  Mesuré : ~7,5 s pour une boucle RF de 54 frames 1104×1337 (159 Mo → 11,9 Mo en J2K 10:1) ;
-  les ouvertures suivantes sortent du cache. Un déport en tâche de fond (Girder jobs) serait
-  le prochain pas si des séries plus volumineuses arrivaient.
+- **Transcodage synchrone** : l'encodage se fait dans le thread de la requête (verrou par clé
+  → un seul encodage pour N lecteurs simultanés). Grâce à la livraison frame par frame, une
+  requête coûte ~0,15 s (une frame), plus les ~7,5 s d'une boucle entière. Un déport en tâche
+  de fond (Girder jobs) reste le prochain pas si des frames beaucoup plus grosses arrivaient.
 - Le cache ne gère **pas les requêtes `Range`** (Cornerstone fait un GET simple).
 
 ## Échelle (px → mm) — IMPORTANT

@@ -17,6 +17,8 @@ aux visites suivantes. Les mesures sont enregistrées dans Girder et **interroge
 - **Compression à la volée** des pixels avant envoi au navigateur (JPEG-LS sans perte par
   défaut, JPEG 2000 avec perte au ratio souhaité en option) : une boucle de scopie non
   compressée passe de ~18 Mo à ~9,6 Mo (sans perte) ou ~1,8 Mo (10:1).
+- **Affichage progressif** des boucles : les images arrivent une par une, la première
+  s'affiche en une fraction de seconde au lieu d'attendre la compression de toute la boucle.
 - Plein écran, navigation à la molette **ou** aux flèches, raccourcis clavier.
 - **Intégration Girder** : extraction automatique des métadonnées DICOM à l'upload, tri des
   coupes par numéro d'instance, panneaux « Métadonnées DICOM » et « Mesures » et lien

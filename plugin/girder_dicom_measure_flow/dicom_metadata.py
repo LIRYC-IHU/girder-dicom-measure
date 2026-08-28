@@ -51,6 +51,10 @@ def _extractFileData(file, dicomMeta):
             "SeriesNumber": dicomMeta.get("SeriesNumber"),
             "InstanceNumber": dicomMeta.get("InstanceNumber"),
             "SliceLocation": dicomMeta.get("SliceLocation"),
+            # Sert au service des pixels : un fichier multi-frame est livré frame par frame
+            # (affichage progressif). Le stocker ici évite de re-sonder l'en-tête de chaque
+            # coupe à l'ouverture d'un examen.
+            "NumberOfFrames": dicomMeta.get("NumberOfFrames"),
         },
     }
 

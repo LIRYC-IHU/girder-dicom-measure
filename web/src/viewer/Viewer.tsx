@@ -15,7 +15,8 @@ import {
   Enums as ToolEnums,
   annotation as csAnnotation,
 } from '@cornerstonejs/tools';
-import { ensureCornerstoneInitialized, buildStackImageIds, prefetchStack } from './cornerstoneSetup';
+import { ensureCornerstoneInitialized, buildStackImageIds } from './cornerstoneSetup';
+import { prefetchStack } from './prefetch';
 import { resolvePixelSpacing, isNonAnatomicScale, readDicomInfo } from './measurements';
 import {
   annotationToMeasurement,
@@ -88,6 +89,10 @@ export function Viewer({
   activeToolRef.current = activeTool;
   const [spacingSource, setSpacingSource] = useState<SpacingSource>('none');
   const [toolsReady, setToolsReady] = useState(false);
+  // Attente de la PREMIÈRE image : depuis le transcodage à la volée côté serveur, ce délai
+  // se compte en secondes sur une grosse boucle (encodage puis mise en cache) — un viewport
+  // noir et muet pendant ce temps se lit comme une panne.
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -101,6 +106,7 @@ export function Viewer({
     const modifyTimers = new Map<string, ReturnType<typeof setTimeout>>();
     const cleanups: Array<() => void> = [];
 
+    setLoading(true);
     (async () => {
       try {
         await ensureCornerstoneInitialized();
@@ -122,6 +128,10 @@ export function Viewer({
         onStackReady?.(imageIds.length);
         engine.resize(true); // garantit le dimensionnement du canvas après le layout
         viewport.render();
+        // `setStack` a résolu → la première image est décodée et affichée. Le reste de la
+        // mise en place (outils, overlays) est synchrone et imperceptible ; les autres
+        // coupes arrivent en tâche de fond (prefetch).
+        setLoading(false);
 
         // Toolgroup partagé.
         ToolGroupManager.destroyToolGroup(TOOL_GROUP_ID);
@@ -134,8 +144,11 @@ export function Viewer({
           bindings: [{ mouseButton: ToolEnums.MouseBindings.Wheel }],
         });
 
-        // Préchargement du stack autour de la slice courante → défilement fluide.
-        prefetchStack(imageIds, 0, () => disposed);
+        // Préchargement de TOUT le stack en arrière-plan → une fois la première image
+        // affichée, le reste arrive sans bloquer, et le défilement ne retouche pas le réseau.
+        // On passe la slice courante en fonction : si l'utilisateur saute ailleurs pendant le
+        // chargement, le préchargement se réoriente autour de sa position.
+        prefetchStack(imageIds, () => viewport.getCurrentImageIdIndex(), () => disposed);
 
         // Le toolgroup existe → l'effet de bascule d'outil peut appliquer l'outil courant.
         setToolsReady(true);
@@ -306,6 +319,7 @@ export function Viewer({
         cleanups.push(() => onApiReady?.(null));
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
+        setLoading(false);
       }
     })();
 
@@ -356,6 +370,12 @@ export function Viewer({
         />
         {/* Calque des fantômes : non interactif, au-dessus du canvas Cornerstone. */}
         <canvas ref={ghostCanvasRef} className="ghost-layer" />
+        {loading && (
+          <div className="loading-overlay" role="status">
+            <div className="spinner" aria-hidden="true" />
+            <span>Chargement de l'image…</span>
+          </div>
+        )}
       </div>
     </div>
   );

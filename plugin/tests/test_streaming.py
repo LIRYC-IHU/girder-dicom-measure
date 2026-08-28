@@ -29,13 +29,22 @@ FAKE_MAX_READ = 4096
 
 
 class _FakeHandle:
-    def __init__(self, data):
+    def __init__(self, data, model):
         self._buf = io.BytesIO(data)
+        self._model = model
 
     def read(self, size=None):
         if size is None or size < 0 or size > FAKE_MAX_READ:
             raise RuntimeError("Read exceeds maximum allowed size.")
-        return self._buf.read(size)
+        chunk = self._buf.read(size)
+        self._model.bytesRead += len(chunk)
+        return chunk
+
+    def seek(self, offset, whence=os.SEEK_SET):
+        return self._buf.seek(offset, whence)
+
+    def tell(self):
+        return self._buf.tell()
 
     def __enter__(self):
         return self
@@ -49,9 +58,10 @@ class _FakeFileModel:
 
     contents = {}
     downloaded = []
+    bytesRead = 0  # cumul lu depuis l'assetstore, pour vérifier qu'on ne relit pas tout
 
     def open(self, doc):
-        return _FakeHandle(self.contents[doc["_id"]])
+        return _FakeHandle(self.contents[doc["_id"]], _FakeFileModel)
 
     def download(self, doc):
         _FakeFileModel.downloaded.append(doc["_id"])
@@ -102,7 +112,16 @@ def streaming(tmp_path, monkeypatch):
     _module("girder.models")
     _module("girder.models.file", File=_FakeFileModel)
     _module("girder.models.setting", Setting=_FakeSetting)
-    _module("girder.exceptions", ValidationException=type("ValidationException", (Exception,), {}))
+    class _RestException(Exception):
+        def __init__(self, message, code=400):
+            super().__init__(message)
+            self.code = code
+
+    _module(
+        "girder.exceptions",
+        ValidationException=type("ValidationException", (Exception,), {}),
+        RestException=_RestException,
+    )
     _module("girder.utility")
     _module(
         "girder.utility.setting_utilities",
@@ -121,6 +140,7 @@ def streaming(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "_READ_CHUNK", FAKE_MAX_READ)
     _FakeFileModel.contents = {}
     _FakeFileModel.downloaded = []
+    _FakeFileModel.bytesRead = 0
     mod._headers = headers
     mod._settings = settings
     return mod
@@ -198,3 +218,78 @@ def test_a_transient_failure_is_not_cached_as_untranscodable(streaming):
 
     # Rien n'a été mémorisé : la requête suivante retente, et cette fois elle transcode.
     assert len(_served(streaming.serveFile(doc))) < len(source)
+
+
+# --- Livraison frame par frame ---------------------------------------------
+
+
+def test_frame_count_is_announced_only_when_splitting_is_possible(streaming):
+    import pydicom
+    from pydicom.uid import RLELossless
+
+    multi = _register(_bytes(_dataset(frames=8)), "cine")
+    assert streaming.frameCount(multi) == 8
+
+    # Mono-frame, déjà compressé, transcodage désactivé : le fichier entier reste le grain.
+    assert streaming.frameCount(_register(_bytes(_dataset()), "single")) == 1
+
+    ds = pydicom.dcmread(io.BytesIO(_bytes(_dataset(frames=8))))
+    ds.compress(RLELossless, generate_instance_uid=False)
+    assert streaming.frameCount(_register(_bytes(ds), "packed")) == 1
+
+    streaming._settings["dmf.compression"] = "none"
+    assert streaming.frameCount(multi) == 1
+
+
+def test_serves_one_frame_without_reading_the_whole_loop(streaming):
+    """Le cœur de l'affichage progressif : servir la frame 0 ne doit pas coûter la boucle.
+
+    Sans ça (lecture complète à chaque frame), la première image arriverait toujours après
+    l'encodage de tout le fichier — et la mémoire du serveur exploserait sous les requêtes
+    parallèles du préchargement.
+    """
+    source = _bytes(_dataset(frames=8))
+    doc = _register(source)
+
+    _FakeFileModel.bytesRead = 0
+    data = _served(streaming.serveFrame(doc, 0))
+
+    assert streaming._headers["X-Dmf-Transfer"] == "transcoded; mode=lossless; frame=0"
+    assert len(data) < len(source) / 4
+    # En-tête + UNE frame, pas les huit.
+    assert _FakeFileModel.bytesRead < len(source) / 2
+
+
+def test_each_frame_is_the_right_image(streaming):
+    """Une erreur d'offset donnerait des images plausibles mais décalées : on vérifie les
+    pixels, frame par frame, contre la source."""
+    import numpy as np
+    import pydicom
+
+    source = _bytes(_dataset(frames=8))
+    expected = pydicom.dcmread(io.BytesIO(source)).pixel_array
+    doc = _register(source)
+
+    for index in (0, 4, 7):
+        out = pydicom.dcmread(io.BytesIO(_served(streaming.serveFrame(doc, index))))
+        assert int(out.NumberOfFrames) == 1
+        np.testing.assert_array_equal(out.pixel_array, expected[index])
+
+
+def test_second_request_for_a_frame_comes_from_the_cache(streaming):
+    source = _bytes(_dataset(frames=8))
+    doc = _register(source)
+
+    first = _served(streaming.serveFrame(doc, 3))
+    _FakeFileModel.bytesRead = 0
+    second = _served(streaming.serveFrame(doc, 3))
+
+    assert first == second
+    assert _FakeFileModel.bytesRead == 0  # rien relu dans l'assetstore
+
+
+def test_an_out_of_range_frame_is_a_clean_404(streaming):
+    doc = _register(_bytes(_dataset(frames=4)))
+    with pytest.raises(Exception) as excinfo:
+        streaming.serveFrame(doc, 99)
+    assert getattr(excinfo.value, "code", None) == 404
