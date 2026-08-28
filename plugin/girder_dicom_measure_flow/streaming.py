@@ -31,6 +31,7 @@ from .settings import PluginSettings
 from .transcode import (
     MODE_NONE,
     buildFrame,
+    declaredFrames,
     frameLayout,
     SKIP_DISABLED,
     SKIP_ERROR,
@@ -157,6 +158,16 @@ def frameCount(file):
         logger.exception("[dmf] lecture de l'en-tête impossible pour %s", file.get("name"))
         return 1
     return layout.frames if layout else 1
+
+
+def probeDeclaredFrames(file):
+    """`NumberOfFrames` de l'en-tête d'un fichier Girder (1 par défaut, jamais d'exception)."""
+    try:
+        with File().open(file) as fp:
+            return declaredFrames(fp) or 1
+    except Exception:
+        logger.exception("[dmf] lecture de l'en-tête impossible pour %s", file.get("name"))
+        return 1
 
 
 def _readFile(file):

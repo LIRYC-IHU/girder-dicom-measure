@@ -159,6 +159,24 @@ def test_frame_layout_locates_each_frame(uncompressed):
     assert layout.offsetOf(8) == layout.valueOffset + 8 * layout.frameSize
 
 
+def test_declared_frames_is_readable_even_when_splitting_declines():
+    """Régression : le nombre de frames DÉCLARÉ doit rester lisible dans tous les cas.
+
+    C'est ce qui distingue « ce fichier est mono-frame » de « je ne sais pas » — la confusion
+    entre les deux a fait servir des boucles entières comme une image unique en production.
+    """
+    assert T.declaredFrames(io.BytesIO(_bytes(_dataset(frames=8)))) == 8
+    assert T.declaredFrames(io.BytesIO(_bytes(_dataset()))) == 1  # tag absent → 1
+
+    # Déjà compressé : la découpe ne s'applique pas, mais le nombre déclaré reste lisible.
+    ds = pydicom.dcmread(io.BytesIO(_bytes(_dataset(frames=8))))
+    ds.compress(RLELossless, generate_instance_uid=False)
+    assert T.frameLayout(io.BytesIO(_bytes(ds))) is None
+    assert T.declaredFrames(io.BytesIO(_bytes(ds))) == 8
+
+    assert T.declaredFrames(io.BytesIO(b"pas du DICOM" * 100)) is None
+
+
 def test_frame_layout_declines_what_it_cannot_split():
     """Mono-frame, déjà compressé, non-DICOM : le fichier entier reste le bon grain."""
     assert T.frameLayout(io.BytesIO(_bytes(_dataset()))) is None  # une seule frame

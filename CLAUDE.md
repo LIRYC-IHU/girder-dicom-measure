@@ -80,6 +80,13 @@ doit pas le rendre impossible.
     répété). `GET /dmf/item/:id/files` annonce `frames` ; > 1 → le client construit une URL par
     frame, 1 → il télécharge le fichier entier (comportement historique, conservé pour les
     sources DÉJÀ compressées, que l'on ne découpe pas).
+    - `NumberOfFrames` est stocké à l'indexation, mais les items indexés par une version
+      antérieure ne l'ont pas : `getFiles` SONDE alors l'en-tête (~3 ms/fichier) et MÉMORISE
+      le résultat. Ne pas « optimiser » en supposant mono-frame les items multi-fichiers non
+      indexés : c'est ce raccourci qui a fait servir des boucles RF entières comme une image
+      unique en production, alors que les tests locaux passaient (item réindexé entre-temps).
+      Le nombre DÉCLARÉ (`transcode.declaredFrames`, propriété stable du fichier, mémorisable)
+      est distinct du nombre LIVRABLE (`streaming.frameCount`, qui dépend des réglages).
     - Seuls les octets de la frame demandée sont lus dans la source : les pixels non compressés
       sont contigus, donc l'offset se calcule (`FrameLayout.offsetOf`) après avoir localisé la
       valeur de PixelData — `dcmread(stop_before_pixels=True)` laisse le flux pile sur

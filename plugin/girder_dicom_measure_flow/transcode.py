@@ -245,6 +245,25 @@ def _readPixelDataHeader(fp, implicitVR):
     return start + 8, struct.unpack("<H", raw[6:8])[0]
 
 
+def declaredFrames(fp):
+    """`NumberOfFrames` déclaré dans l'en-tête (1 s'il est absent), ou None si ce n'est pas
+    du DICOM lisible.
+
+    Lecture minimale (`specific_tags`) : c'est une propriété STABLE du fichier, que l'appelant
+    mémorise pour ne pas resonder à chaque ouverture. À ne pas confondre avec le nombre de
+    frames LIVRABLES séparément (`streaming.frameCount`), qui dépend, lui, des réglages et de
+    la syntaxe de transfert.
+    """
+    try:
+        ds = pydicom.dcmread(fp, stop_before_pixels=True, specific_tags=["NumberOfFrames"])
+    except Exception:
+        return None
+    try:
+        return max(int(ds.get("NumberOfFrames") or 1), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
 def frameLayout(fp):
     """Analyse l'en-tête d'une source et renvoie un `FrameLayout`, ou None si la livraison
     frame par frame ne s'applique pas (non-DICOM, déjà compressé, format non géré, ou une

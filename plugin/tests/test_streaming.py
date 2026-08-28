@@ -293,3 +293,18 @@ def test_an_out_of_range_frame_is_a_clean_404(streaming):
     with pytest.raises(Exception) as excinfo:
         streaming.serveFrame(doc, 99)
     assert getattr(excinfo.value, "code", None) == 404
+
+
+def test_probe_declared_frames_survives_everything(streaming):
+    """Sert à mémoriser une propriété du fichier : ne doit jamais lever, ni mentir sur un
+    fichier multi-frame (sinon la boucle repart en un bloc, cf. régression de prod)."""
+    assert streaming.probeDeclaredFrames(_register(_bytes(_dataset(frames=8)))) == 8
+    assert streaming.probeDeclaredFrames(_register(_bytes(_dataset()), "mono")) == 1
+    assert streaming.probeDeclaredFrames(_register(b"pas du DICOM" * 50, "junk")) == 1
+
+    # Le mode `none` désactive la LIVRAISON par frame, pas la lecture de l'en-tête : sinon on
+    # mémoriserait « mono-frame » et la découpe resterait morte après réactivation.
+    streaming._settings["dmf.compression"] = "none"
+    multi = _register(_bytes(_dataset(frames=8)), "cine2")
+    assert streaming.probeDeclaredFrames(multi) == 8
+    assert streaming.frameCount(multi) == 1

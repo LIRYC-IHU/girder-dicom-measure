@@ -12,6 +12,8 @@ Annotations : stockées dans la collection dédiée `dmf_annotation` (cf. models
 liste filtrée/paginée + CRUD unitaire par `key` (identifiant client).
 """
 
+import logging
+
 import cherrypy
 from girder.api import access
 from girder.api.describe import Description, autoDescribeRoute
@@ -26,8 +28,17 @@ from girder.models.setting import Setting
 from .dicom_metadata import processItem
 from .models import Annotation
 from .settings import DEFAULTS, PluginSettings
-from .streaming import compressionSettings, frameCount, serveFile, serveFrame
+from .streaming import (
+    compressionSettings,
+    frameCount,
+    probeDeclaredFrames,
+    serveFile,
+    serveFrame,
+)
 from .transcode import MODES
+
+
+logger = logging.getLogger("girder.dicom_measure_flow")
 
 
 def _folderItemIds(folder, user):
@@ -161,29 +172,44 @@ class DmfResource(Resource):
         )
     )
     def getFiles(self, item):
-        ordered = (item.get("dicom") or {}).get("files")
-        if ordered:
-            docs = [(str(f["_id"]), f.get("name"), (f.get("dicom") or {})) for f in ordered]
+        entries = (item.get("dicom") or {}).get("files")
+        if entries:
+            docs = [(str(f["_id"]), f.get("name"), f) for f in entries]
         else:
-            docs = [(str(f["_id"]), f["name"], {}) for f in Item().childFiles(item)]
+            docs = [(str(f["_id"]), f["name"], None) for f in Item().childFiles(item)]
 
         # `frames` > 1 → le client demandera une URL par frame (affichage progressif) plutôt
-        # que le fichier entier. Sonder l'en-tête coûte quelques Ko, mais le faire pour les
-        # 100+ coupes d'un CT serait du gâchis : on ne sonde que ce qui peut être multi-frame,
-        # c'est-à-dire un `NumberOfFrames` déjà connu ≥ 2, ou un item d'un seul fichier dont
-        # on ne sait rien (item antérieur au plugin → `POST /dmf/reprocess` renseigne le tag).
-        def frames(fileId, meta):
-            known = meta.get("NumberOfFrames")
-            if known is None and len(docs) > 1:
-                return 1
-            if known is not None and int(known or 1) < 2:
-                return 1
-            return frameCount(File().load(fileId, force=True))
+        # que le fichier entier.
+        #
+        # `NumberOfFrames` est stocké à l'indexation, mais les items indexés par une version
+        # antérieure ne l'ont pas. On le SONDE alors dans l'en-tête (~3 ms) et on MÉMORISE le
+        # résultat : sans ça, soit on resonde à chaque ouverture (une série CT de 300 coupes
+        # coûterait une seconde à chaque fois), soit — ce qui était le cas — on suppose
+        # « mono-frame » pour tout item multi-fichiers et les boucles ne sont jamais découpées.
+        learned = False
+        files = []
+        for fileId, name, entry in docs:
+            declared = ((entry or {}).get("dicom") or {}).get("NumberOfFrames")
+            if declared is None:
+                declared = probeDeclaredFrames(File().load(fileId, force=True))
+                if entry is not None:
+                    entry.setdefault("dicom", {})["NumberOfFrames"] = declared
+                    learned = True
+            # Le nombre DÉCLARÉ ne dit pas que la découpe s'applique (source déjà compressée,
+            # transcodage désactivé…) : seul `frameCount` tranche, et il relit l'en-tête.
+            frames = 1
+            if int(declared or 1) > 1:
+                frames = frameCount(File().load(fileId, force=True))
+            files.append({"id": fileId, "name": name, "frames": frames})
 
-        return [
-            {"id": fileId, "name": name, "frames": frames(fileId, meta)}
-            for fileId, name, meta in docs
-        ]
+        if learned:
+            try:
+                Item().save(item)
+            except Exception:
+                # Le cache de métadonnées est un confort : son échec ne doit pas priver le
+                # client de sa liste de fichiers.
+                logger.exception("[dmf] NumberOfFrames non mémorisé sur l'item %s", item["_id"])
+        return files
 
     @access.user(cookie=True)
     @autoDescribeRoute(
