@@ -149,6 +149,15 @@ autres) : transparent pour la SPA, qui ne voit qu'une session.
   restreinte à `core.data.read` (scripts d'analyse) y accède, comme aux GET du cœur Girder.
   L'accès READ à l'item reste vérifié ; `user`, les écritures et l'admin exigent toujours un
   token utilisateur complet. Les mesures renvoyées portent `itemId` (listes par `folderId`).
+- **Empreinte des pixels** : à chaque réception (`data.process`) et au backfill (`reprocess`),
+  `transcode.pixelDataDigest` calcule `sha256(PixelData)` — valeur encodée, en-tête DICOM
+  exclu (il change à la pseudonymisation), items encapsulés jusqu'au délimiteur exclu : c'est
+  exactement `sha256(pydicom.dcmread(f).PixelData)`, vérifiable hors plugin. Stockée dans
+  `item.dicom.files[].dicom.PixelDataSHA256` (lisible en `core.data.read` via `GET /item`),
+  indexée, et interrogeable par `GET /dmf/pixelhash/:hash` (fichiers lisibles portant cette
+  empreinte → doublons, même sous un autre patient/cas). Lecture PAR BLOCS (jamais le fichier
+  entier en mémoire) ; un échec est journalisé et laisse l'empreinte vide sans bloquer
+  l'indexation. `reprocess` conserve les empreintes connues (`rehash=true` pour tout recalculer).
 - **Cornerstone** : `beforeSend: xhr => { xhr.withCredentials = true }` → le cookie part avec
   le fetch des pixels (`/api/v1/dmf/file/:id`). `credentials: 'include'` côté client REST.
 - **Mode dev** (`vite dev`, cross-origin) : pas de cookie → `VITE_GIRDER_TOKEN` envoyé en

@@ -245,6 +245,62 @@ def _readPixelDataHeader(fp, implicitVR):
     return start + 8, struct.unpack("<H", raw[6:8])[0]
 
 
+HASH_CHUNK = 8 * 1024 * 1024  # < `core.filehandle_max_size` (cf. streaming._readFile)
+_UNDEFINED_LENGTH = 0xFFFFFFFF
+_ITEM_TAG = (0xFFFE, 0xE000)
+
+
+def pixelDataDigest(fp, chunkSize=HASH_CHUNK):
+    """SHA-256 (hex) de la VALEUR de PixelData telle qu'encodée, ou None (non-DICOM, pas de
+    pixels : SR, PR…).
+
+    L'en-tête DICOM est exclu : il change d'un envoi à l'autre (pseudonymisation, UIDs
+    régénérés), les pixels non → deux envois de la même image ont la même empreinte.
+    Définition vérifiable : c'est `sha256(pydicom.dcmread(f).PixelData)` — longueur définie :
+    exactement la longueur déclarée ; pixels encapsulés : les items (en-têtes compris) jusqu'au
+    délimiteur de séquence, exclu. Lecture par blocs bornés, jamais le fichier entier en
+    mémoire (boucles de plusieurs centaines de Mo).
+    Limite : la même image ré-encodée dans une autre syntaxe de transfert a une autre empreinte.
+    """
+    try:
+        ds = pydicom.dcmread(fp, stop_before_pixels=True)
+    except Exception:
+        return None
+    ts = getattr(getattr(ds, "file_meta", None), "TransferSyntaxUID", None)
+    if ts is None:
+        return None
+    header = _readPixelDataHeader(fp, bool(ts.is_implicit_VR))
+    if header is None:
+        return None
+    valueOffset, length = header
+    fp.seek(valueOffset)
+    digest = hashlib.sha256()
+
+    def feed(n):
+        while n > 0:
+            chunk = fp.read(min(chunkSize, n))
+            if not chunk:
+                return False
+            digest.update(chunk)
+            n -= len(chunk)
+        return True
+
+    if length != _UNDEFINED_LENGTH:
+        feed(length)
+        return digest.hexdigest()
+    while True:  # encapsulé : item (FFFE,E000) … jusqu'au délimiteur (FFFE,E0DD)
+        head = fp.read(8)
+        if len(head) < 8:
+            break
+        group, element, itemLength = struct.unpack("<HHI", head)
+        if (group, element) != _ITEM_TAG:
+            break
+        digest.update(head)
+        if not feed(itemLength):
+            break
+    return digest.hexdigest()
+
+
 def declaredFrames(fp):
     """`NumberOfFrames` déclaré dans l'en-tête (1 s'il est absent), ou None si ce n'est pas
     du DICOM lisible.

@@ -9,19 +9,30 @@ plugin soit autosuffisant (pas de dépendance à `dicom_viewer`) :
   - on stocke sur l'item :
         item['dicom'] = {
             'meta':  <métadonnées communes à TOUS les fichiers DICOM de l'item>,
-            'files': [ {'_id', 'name', 'dicom': {SeriesNumber, InstanceNumber, SliceLocation}}, ... ]
+            'files': [ {'_id', 'name', 'dicom': {SeriesNumber, InstanceNumber, SliceLocation,
+                                                 NumberOfFrames, PixelDataSHA256}}, ... ]
         }
     la liste `files` est TRIÉE par (SeriesNumber, InstanceNumber, SliceLocation, name)
     → le client lit cet ordre pour empiler les coupes (item 2 : tri des instances).
 
 Le champ `dicom` est exposé en lecture via l'API REST (cf. __init__.py).
+
+`PixelDataSHA256` = empreinte de la donnée pixel (hors en-tête, cf. `transcode.pixelDataDigest`),
+calculée à CHAQUE réception d'un fichier : elle permet de repérer une même image envoyée
+plusieurs fois, y compris sous un autre patient ou dans un autre cas (`GET /dmf/pixelhash/:hash`).
+
 """
+
+import logging
 
 import pydicom
 from girder.models.file import File
 from girder.models.item import Item
 
 from .dicom_tags import coerce_metadata, sort_key
+from .transcode import pixelDataDigest
+
+logger = logging.getLogger("girder.dicom_measure_flow")
 
 
 def _parseFile(f):
@@ -34,6 +45,17 @@ def _parseFile(f):
     return coerce_metadata(dataset)
 
 
+def _pixelHash(f):
+    """Empreinte des pixels d'un fichier Girder ; None si pas de pixels ou échec de lecture
+    (l'échec est journalisé mais ne doit jamais bloquer l'indexation)."""
+    try:
+        with File().open(f) as fp:
+            return pixelDataDigest(fp)
+    except Exception:
+        logger.exception("[dmf] empreinte des pixels impossible pour %s", f.get("name"))
+        return None
+
+
 def _removeUniqueMetadata(dicomMeta, additionalMeta):
     """Intersection des deux dictionnaires (métadonnées communes à tous les fichiers)."""
     return dict(
@@ -42,7 +64,7 @@ def _removeUniqueMetadata(dicomMeta, additionalMeta):
     )
 
 
-def _extractFileData(file, dicomMeta):
+def _extractFileData(file, dicomMeta, pixelHash=None):
     """Données par fichier conservées pour le tri et l'affichage côté client."""
     return {
         "_id": file["_id"],
@@ -55,6 +77,7 @@ def _extractFileData(file, dicomMeta):
             # (affichage progressif). Le stocker ici évite de re-sonder l'en-tête de chaque
             # coupe à l'ouverture d'un examen.
             "NumberOfFrames": dicomMeta.get("NumberOfFrames"),
+            "PixelDataSHA256": pixelHash,
         },
     }
 
@@ -80,18 +103,30 @@ def handleUploadedDicom(event):
     item["dicom"]["files"] = [
         x for x in item["dicom"]["files"] if x.get("_id") != file["_id"]
     ]
-    item["dicom"]["files"].append(_extractFileData(file, fileMetadata))
+    item["dicom"]["files"].append(_extractFileData(file, fileMetadata, _pixelHash(file)))
     item["dicom"]["files"].sort(key=sort_key)
 
     Item().save(item)
 
 
-def processItem(item):
+def _knownHashes(item):
+    """Empreintes déjà calculées, par fichier. Le contenu d'un fichier ne change que par une
+    nouvelle réception (`data.process` la recalcule), elles restent donc valables."""
+    return {
+        str(x.get("_id")): (x.get("dicom") or {}).get("PixelDataSHA256")
+        for x in (item.get("dicom") or {}).get("files", [])
+    }
+
+
+def processItem(item, rehash=False):
     """Retraite TOUS les fichiers d'un item (backfill des items uploadés avant le plugin).
 
     Reconstruit `item['dicom']` (métadonnées communes + fichiers triés) à partir de zéro.
-    Renvoie True si l'item contient au moins un fichier DICOM exploitable.
+    Les empreintes des pixels déjà connues sont conservées (sauf `rehash`) : seul un fichier
+    sans empreinte est relu en entier. Renvoie True si l'item contient au moins un fichier
+    DICOM exploitable.
     """
+    known = {} if rehash else _knownHashes(item)
     dicom = None
     for f in Item().childFiles(item):
         meta = _parseFile(f)
@@ -101,7 +136,8 @@ def processItem(item):
             dicom = {"meta": meta, "files": []}
         else:
             dicom["meta"] = _removeUniqueMetadata(dicom["meta"], meta)
-        dicom["files"].append(_extractFileData(f, meta))
+        pixelHash = known.get(str(f["_id"])) or _pixelHash(f)
+        dicom["files"].append(_extractFileData(f, meta, pixelHash))
     if dicom is None:
         return False
     dicom["files"].sort(key=sort_key)

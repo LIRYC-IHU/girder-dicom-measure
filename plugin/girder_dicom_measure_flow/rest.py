@@ -16,6 +16,7 @@ liste filtrée/paginée + CRUD unitaire par `key` (identifiant client).
 """
 
 import logging
+import re
 
 import cherrypy
 from girder.api import access
@@ -117,6 +118,7 @@ class DmfResource(Resource):
         self.route("GET", ("file", ":id"), self.downloadFile)
         self.route("GET", ("file", ":id", "frame", ":index"), self.downloadFrame)
         self.route("POST", ("reprocess",), self.reprocess)
+        self.route("GET", ("pixelhash", ":hash"), self.findPixelHash)
 
     # --- Configuration publique --------------------------------------------
 
@@ -314,15 +316,21 @@ class DmfResource(Resource):
     @access.admin
     @autoDescribeRoute(
         Description(
-            "Retraite les items DICOM existants (extraction métadonnées + tri). "
-            "Backfill des items uploadés avant l'installation du plugin. Admin uniquement."
-        ).param(
+            "Retraite les items DICOM existants (extraction métadonnées + tri + empreinte des "
+            "pixels). Backfill des items uploadés avant l'installation du plugin. Admin uniquement. "
+            "Les empreintes déjà connues sont conservées : seuls les fichiers sans empreinte sont "
+            "relus en entier (le premier passage sur une grosse collection peut être long : "
+            "préférer un appel par dossier)."
+        )
+        .param(
             "folderId",
             "Limiter à un dossier (récursif). Sinon : tous les items.",
             required=False,
         )
+        .param("rehash", "Recalculer toutes les empreintes des pixels.", required=False,
+               dataType="boolean", default=False)
     )
-    def reprocess(self, folderId):
+    def reprocess(self, folderId, rehash):
         _checkSameOrigin()
         user = getCurrentUser()
         if folderId:
@@ -335,9 +343,34 @@ class DmfResource(Resource):
             if item is None:
                 continue
             scanned += 1
-            if processItem(item):
+            if processItem(item, rehash=rehash):
                 processed += 1
         return {"scanned": scanned, "dicomItems": processed}
+
+    # --- Empreintes des pixels ------------------------------------------------
+
+    @access.user(scope=TokenScope.DATA_READ, cookie=True)
+    @autoDescribeRoute(
+        Description(
+            "Fichiers dont la donnée pixel a cette empreinte SHA-256 (champ "
+            "`dicom.files[].dicom.PixelDataSHA256` des items) : repère une même image envoyée "
+            "plusieurs fois. Limité aux items que l'utilisateur peut lire."
+        ).param("hash", "Empreinte SHA-256 (hexadécimal).", paramType="path")
+    )
+    def findPixelHash(self, hash):
+        user = getCurrentUser()
+        digest = (hash or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise RestException("Empreinte SHA-256 invalide (64 caractères hexadécimaux).", code=400)
+        cursor = Item().find({"dicom.files.dicom.PixelDataSHA256": digest})
+        out = []
+        for item in Item().filterResultsByPermission(cursor, user, AccessType.READ):
+            for f in item["dicom"]["files"]:
+                if (f.get("dicom") or {}).get("PixelDataSHA256") == digest:
+                    out.append({"itemId": str(item["_id"]), "itemName": item.get("name"),
+                                "folderId": str(item["folderId"]), "fileId": str(f["_id"]),
+                                "fileName": f.get("name")})
+        return out
 
     # --- Pixels ------------------------------------------------------------
 

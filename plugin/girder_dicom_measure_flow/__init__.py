@@ -40,6 +40,8 @@ class DicomMeasureFlowPlugin(GirderPlugin):
         events.bind("data.process", "dicom_measure_flow", handleUploadedDicom)
         # 2 : rendre le champ `dicom` (méta communes + ordre des fichiers) lisible via REST.
         Item().exposeFields(level=AccessType.READ, fields="dicom")
+        # Recherche des doublons par empreinte des pixels (GET /dmf/pixelhash/:hash).
+        Item().ensureIndices(["dicom.files.dicom.PixelDataSHA256"])
 
         # Auth durcie (option 1) : routes dédiées /api/v1/dmf/* en auth cookie (aucun token
         # exposé en JS), mutation protégée par vérif d'Origin.

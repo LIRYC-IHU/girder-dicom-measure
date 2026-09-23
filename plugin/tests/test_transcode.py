@@ -288,3 +288,70 @@ def test_cache_evicts_least_recently_used(tmp_path):
     assert cache.lookup("old") == (False, None)
     assert cache.lookup("new")[1] is not None
     assert cache.lookup("last")[1] is not None
+
+
+# --- Empreinte des pixels ---------------------------------------------------------
+
+
+def _digest(data, **kwargs):
+    return T.pixelDataDigest(io.BytesIO(data), **kwargs)
+
+
+def test_pixel_digest_is_sha256_of_pixel_value():
+    import hashlib
+
+    ds = _dataset(frames=3)
+    assert _digest(_bytes(ds)) == hashlib.sha256(ds.PixelData).hexdigest()
+
+
+def test_pixel_digest_ignores_header_changes():
+    """Même image ré-exportée (UIDs régénérés, patient pseudonymisé) → même empreinte."""
+    a, b = _dataset(frames=3), _dataset(frames=3)
+    b.SOPInstanceUID = b.file_meta.MediaStorageSOPInstanceUID = generate_uid()
+    b.SeriesInstanceUID = generate_uid()
+    b.PatientID, b.PatientName = "8-5", "DEFINE-PFA^8-5"
+    assert _digest(_bytes(a)) == _digest(_bytes(b))
+
+
+def test_pixel_digest_same_for_implicit_and_explicit_vr():
+    from pydicom.uid import ImplicitVRLittleEndian
+
+    explicit = _dataset(frames=2)
+    implicit = _dataset(frames=2)
+    implicit.file_meta.TransferSyntaxUID = ImplicitVRLittleEndian
+    buf = io.BytesIO()
+    implicit.save_as(buf, enforce_file_format=True, implicit_vr=True, little_endian=True)
+    assert _digest(buf.getvalue()) == _digest(_bytes(explicit))
+
+
+def test_pixel_digest_differs_for_different_pixels():
+    a, b = _dataset(frames=2), _dataset(frames=2)
+    pixels = bytearray(b.PixelData)
+    pixels[len(pixels) // 2] ^= 0xFF
+    b.PixelData = bytes(pixels)
+    assert _digest(_bytes(a)) != _digest(_bytes(b))
+
+
+def test_pixel_digest_independent_of_chunk_size():
+    data = _bytes(_dataset(frames=8))
+    assert _digest(data, chunkSize=1000) == _digest(data)
+
+
+def test_pixel_digest_encapsulated_matches_pydicom_and_is_stable():
+    import hashlib
+
+    ds = _dataset(frames=2)
+    ds.compress(RLELossless)
+    data = _bytes(ds)
+    first = _digest(data)
+    assert first == hashlib.sha256(pydicom.dcmread(io.BytesIO(data)).PixelData).hexdigest()
+    assert _digest(data, chunkSize=100) == first
+    ds.SOPInstanceUID = ds.file_meta.MediaStorageSOPInstanceUID = generate_uid()
+    assert _digest(_bytes(ds)) == first
+
+
+def test_pixel_digest_none_without_pixels_or_dicom():
+    ds = _dataset()
+    del ds.PixelData
+    assert _digest(_bytes(ds)) is None       # SR, PR… : pas de pixels
+    assert _digest(b"pas un DICOM") is None
