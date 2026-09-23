@@ -11,12 +11,12 @@ import {
   ProbeTool,
   PanTool,
   ZoomTool,
-  StackScrollTool,
   Enums as ToolEnums,
   annotation as csAnnotation,
 } from '@cornerstonejs/tools';
 import { ensureCornerstoneInitialized, buildStackImageIds } from './cornerstoneSetup';
 import { prefetchStack } from './prefetch';
+import { createWheelStepper } from './wheelScroll';
 import { resolvePixelSpacing, isNonAnatomicScale, readDicomInfo } from './measurements';
 import {
   annotationToMeasurement,
@@ -65,6 +65,8 @@ interface ViewerProps {
   onFrameChange?: (frameIndex: number) => void;
   /** Nombre réel de slices/frames du stack (≠ nombre de fichiers si multiframe). */
   onStackReady?: (frameCount: number) => void;
+  /** Avancement du préchargement : nombre d'images déjà en cache (ordre des coupes). */
+  onLoadProgress?: (loaded: number) => void;
   /** Reçoit l'API impérative quand le viewer est prêt (et null au démontage). */
   onApiReady?: (api: ViewerApi | null) => void;
   /** Métadonnées DICOM de la coupe courante (item 4). */
@@ -78,6 +80,7 @@ export function Viewer({
   user,
   onFrameChange,
   onStackReady,
+  onLoadProgress,
   onApiReady,
   onDicomInfo,
 }: ViewerProps) {
@@ -136,19 +139,29 @@ export function Viewer({
         // Toolgroup partagé.
         ToolGroupManager.destroyToolGroup(TOOL_GROUP_ID);
         const toolGroup = ToolGroupManager.createToolGroup(TOOL_GROUP_ID)!;
-        [LengthTool, ProbeTool, PanTool, ZoomTool, StackScrollTool].forEach((t) =>
-          toolGroup.addTool(t.toolName),
-        );
+        [LengthTool, ProbeTool, PanTool, ZoomTool].forEach((t) => toolGroup.addTool(t.toolName));
         toolGroup.addViewport(VIEWPORT_ID, RENDERING_ENGINE_ID);
-        toolGroup.setToolActive(StackScrollTool.toolName, {
-          bindings: [{ mouseButton: ToolEnums.MouseBindings.Wheel }],
-        });
+
+        // Défilement molette/trackpad maison (cf. wheelScroll.ts) : `StackScrollTool` avance
+        // d'une coupe par ÉVÉNEMENT wheel, ce qui rend le trackpad inutilisable.
+        const nextStep = createWheelStepper();
+        const onWheel = (e: WheelEvent) => {
+          e.preventDefault();
+          const steps = nextStep(e.deltaY, e.deltaMode);
+          if (!steps) return;
+          const n = viewport.getImageIds().length;
+          const cur = viewport.getCurrentImageIdIndex();
+          const nextIdx = Math.min(n - 1, Math.max(0, cur + steps));
+          if (nextIdx !== cur) void viewport.setImageIdIndex(nextIdx);
+        };
+        element.addEventListener('wheel', onWheel, { passive: false });
+        cleanups.push(() => element.removeEventListener('wheel', onWheel));
 
         // Préchargement de TOUT le stack en arrière-plan → une fois la première image
         // affichée, le reste arrive sans bloquer, et le défilement ne retouche pas le réseau.
-        // On passe la slice courante en fonction : si l'utilisateur saute ailleurs pendant le
-        // chargement, le préchargement se réoriente autour de sa position.
-        prefetchStack(imageIds, () => viewport.getCurrentImageIdIndex(), () => disposed);
+        // Chargement dans l'ordre des coupes, avec remontée de l'avancement (compteur
+        // « courante / chargées / total » de la barre d'infos).
+        prefetchStack(imageIds, () => disposed, (loaded) => onLoadProgress?.(loaded));
 
         // Le toolgroup existe → l'effet de bascule d'outil peut appliquer l'outil courant.
         setToolsReady(true);

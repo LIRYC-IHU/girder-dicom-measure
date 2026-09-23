@@ -9,45 +9,36 @@ import { imageLoader } from '@cornerstonejs/core';
  * Précharge TOUT le stack en arrière-plan (cache image Cornerstone) : une fois la coupe
  * courante affichée, le reste continue d'arriver, et le défilement ne touche plus le réseau.
  *
- * L'ordre est recalculé À CHAQUE créneau libéré, en repartant de la coupe RÉELLEMENT affichée
- * (`currentIndex`) : depuis que les boucles sont livrées frame par frame, le préchargement
- * dure quelques secondes, et un ordre figé au démarrage ferait attendre l'utilisateur qui
- * saute d'emblée au milieu de la série — ses voisines seraient en fin de file.
+ * L'ordre est SÉQUENTIEL (0, 1, 2, …) : le nombre d'images chargées est alors le préfixe
+ * réellement disponible, ce qui rend le compteur de progression lisible (« 1/35/146 »).
+ * Un ordre réorienté autour de la coupe regardée servait l'utilisateur qui saute au milieu
+ * pendant le chargement, mais laissait des trous impossibles à résumer en un chiffre.
  *
  * La concurrence est bornée pour ne saturer ni les workers de décodage ni le serveur (qui
  * encode une frame par requête). `isAborted` coupe tout au démontage. Fire-and-forget : ne
- * bloque pas le rendu initial.
+ * bloque pas le rendu initial. `onProgress` reçoit le nombre d'images terminées (succès ou
+ * échec : une image qui ne chargera jamais ne doit pas figer le compteur).
  */
 export function prefetchStack(
   imageIds: string[],
-  currentIndex: () => number,
   isAborted: () => boolean,
+  onProgress?: (loaded: number) => void,
   concurrency = 6,
 ): void {
-  const pending = new Set(imageIds.map((_, i) => i));
-
-  const nearestPending = (): number => {
-    const target = currentIndex();
-    let best = -1;
-    let bestDistance = Infinity;
-    for (const index of pending) {
-      const distance = Math.abs(index - target);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        best = index;
-      }
-    }
-    return best;
-  };
+  let next = 0;
+  let loaded = 0;
 
   const pump = (): void => {
-    if (isAborted() || pending.size === 0) return;
-    const index = nearestPending();
-    pending.delete(index);
+    if (isAborted() || next >= imageIds.length) return;
+    const index = next++;
     imageLoader
       .loadAndCacheImage(imageIds[index])
       .catch(() => undefined)
-      .finally(pump);
+      .finally(() => {
+        loaded++;
+        if (!isAborted()) onProgress?.(loaded);
+        pump();
+      });
   };
   for (let k = 0; k < Math.min(concurrency, imageIds.length); k++) pump();
 }

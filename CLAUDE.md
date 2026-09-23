@@ -97,9 +97,11 @@ doit pas le rendre impossible.
     - Le RESTE du stack continue d'être préchargé en mémoire derrière la première image
       (`viewer/prefetch.ts`, cache image Cornerstone plafonné à 3 Go par défaut → aucune
       éviction aux tailles visées) : une fois chargé, le défilement ne touche plus le réseau.
-      L'ordre est recalculé à chaque créneau libéré autour de la coupe RÉELLEMENT affichée —
-      avec un ordre figé, un utilisateur sautant au milieu pendant les quelques secondes de
-      préchargement attendrait ses voisines, en fin de file.
+      L'ordre est SÉQUENTIEL (coupe 0, 1, 2, …) : le nombre d'images chargées désigne alors un
+      préfixe réellement disponible, ce qui se résume en un chiffre — la barre d'infos affiche
+      `courante/chargées/total` (« 1/35/146 ») pendant le préchargement, puis `courante/total`.
+      (Un ordre réorienté autour de la coupe regardée a été essayé : il sert l'utilisateur qui
+      saute au milieu, mais laisse des trous inracontables.)
   - **Cache disque** obligatoire à l'usage (le J2K coûte ~1 s pour 69 frames) : `dmf.cache_dir`
     (défaut = tmp système), éviction LRU sous `dmf.cache_max_mb`, clé = (fichier, mode, ratio).
     Une entrée VIDE mémorise un « non transcodable » (évite de re-parser à chaque requête).
@@ -265,6 +267,11 @@ réécriture de liste globale.
   `store` (Cornerstone/girder mockés).
 - **Raccourcis outils** : **touche simple** (D/P/H/V), sans modificateur (évite le conflit
   ⌘H = masquer sur macOS) ; ignorés si modificateur pressé ou focus dans un champ.
+- **Défilement des coupes** : handler molette maison (`viewer/wheelScroll.ts`), PAS
+  `StackScrollTool` — celui-ci avance d'une coupe par ÉVÉNEMENT `wheel`, or un trackpad en
+  émet des dizaines (inertie comprise) par glissement → la série défilait d'un bout à l'autre.
+  On accumule les pixels (seuil ~40 px/coupe) et on garde « un cran de molette = une coupe »
+  pour les gros `deltaY`.
 - **Test standalone sans Girder** : données dans `test_data/<étude>/*.dcm`, ouvrir
   `?standalone=CT` (annotations en `localStorage`). `&cpu` force le rendu CPU (headless).
 - **Pièges Vite + Cornerstone** (à ne pas réintroduire) :

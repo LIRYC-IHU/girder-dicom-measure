@@ -97,6 +97,17 @@ async function loadStandalone(requested: string | null): Promise<Ready> {
   };
 }
 
+/**
+ * Compteur de la barre d'infos : « courante / total », et « courante / chargées / total »
+ * tant que le préchargement n'a pas fini (le chiffre du milieu dit jusqu'où le stack est
+ * réellement en mémoire — une boucle de scopie met plusieurs secondes à arriver).
+ */
+function frameCounter(current: number, loaded: number, total: number): string {
+  return loaded >= total
+    ? `${current + 1}/${total}`
+    : `${current + 1}/${loaded}/${total}`;
+}
+
 // --- Mode Girder (prod) : ?itemId=<girderItemId> ---
 async function loadGirder(itemId: string): Promise<Ready> {
   // Fichiers DANS L'ORDRE DES COUPES (tri serveur via item.dicom.files, sinon repli).
@@ -111,6 +122,8 @@ export default function App() {
   const itemId = params.get('itemId');
   const [ready, setReady] = useState<Ready | null>(null);
   const [frameCount, setFrameCount] = useState<number | null>(null);
+  // Images déjà préchargées (ordre des coupes) : affiché tant que le stack n'est pas complet.
+  const [loadedFrames, setLoadedFrames] = useState(0);
   const [currentFrame, setCurrentFrame] = useState(0);
   const [activeTool, setActiveTool] = useState<ActiveTool>('distance');
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
@@ -224,7 +237,8 @@ export default function App() {
         </button>
         <span className="spacer" />
         <span className="user">
-          {ready.source} — {frameCount ? `${currentFrame + 1}/${frameCount}` : '…'} image(s) ·{' '}
+          {ready.source} — {frameCount ? frameCounter(currentFrame, loadedFrames, frameCount) : '…'}{' '}
+          image(s) ·{' '}
           {ready.user.name}
         </span>
       </div>
@@ -235,7 +249,11 @@ export default function App() {
           store={ready.store}
           user={ready.user}
           onFrameChange={setCurrentFrame}
-          onStackReady={setFrameCount}
+          onStackReady={(n) => {
+            setLoadedFrames(0);
+            setFrameCount(n);
+          }}
+          onLoadProgress={setLoadedFrames}
           onApiReady={setViewerApi}
           onDicomInfo={setDicomInfo}
         />
