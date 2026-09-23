@@ -144,6 +144,11 @@ autres) : transparent pour la SPA, qui ne voit qu'une session.
   Les lectures (sans effet de bord) sont sûres en cookie ; l'écriture (`PUT .../annotations`)
   autorise le cookie MAIS est protégée du CSRF par une **vérification d'Origin** côté serveur
   (l'Origin doit matcher l'hôte). Les routes vérifient l'accès Girder READ/WRITE de l'item.
+- **Tokens en lecture seule** : les GET de DONNÉES (`item/:id/files|dicom|annotations`,
+  `annotation`, `file/:id[/frame/:i]`) déclarent `scope=TokenScope.DATA_READ` → une clé d'API
+  restreinte à `core.data.read` (scripts d'analyse) y accède, comme aux GET du cœur Girder.
+  L'accès READ à l'item reste vérifié ; `user`, les écritures et l'admin exigent toujours un
+  token utilisateur complet. Les mesures renvoyées portent `itemId` (listes par `folderId`).
 - **Cornerstone** : `beforeSend: xhr => { xhr.withCredentials = true }` → le cookie part avec
   le fetch des pixels (`/api/v1/dmf/file/:id`). `credentials: 'include'` côté client REST.
 - **Mode dev** (`vite dev`, cross-origin) : pas de cookie → `VITE_GIRDER_TOKEN` envoyé en

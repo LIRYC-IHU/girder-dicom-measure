@@ -4,6 +4,9 @@ Durcissement de l'autorisation (option 1) : la SPA n'a PLUS besoin d'un token en
   - Lectures (user, files, dicom, annotations, pixels) : auth par COOKIE de session
     (`@access.user(cookie=True)`) — sûr car sans effet de bord. Le token explicite reste
     accepté (utile en dev cross-origin).
+  - Lectures de DONNÉES (files, dicom, annotations, pixels) : ouvertes aussi aux tokens
+    restreints au scope `core.data.read` (clé d'API en lecture seule, scripts d'analyse),
+    comme les GET du cœur de Girder. L'accès READ à l'item/fichier reste vérifié.
   - Écritures (POST/PUT/DELETE annotations) : auth par cookie autorisée MAIS protégée
     contre le CSRF par une vérification d'Origin (même origine que Girder requise).
   - Toutes les routes vérifient l'accès Girder (READ/WRITE) de l'utilisateur à l'item.
@@ -18,7 +21,7 @@ import cherrypy
 from girder.api import access
 from girder.api.describe import Description, autoDescribeRoute
 from girder.api.rest import Resource, getCurrentUser
-from girder.constants import AccessType
+from girder.constants import AccessType, TokenScope
 from girder.exceptions import AccessException, RestException
 from girder.models.file import File
 from girder.models.folder import Folder
@@ -165,7 +168,7 @@ class DmfResource(Resource):
     def getUser(self):
         return _userInfo(getCurrentUser())
 
-    @access.user(cookie=True)
+    @access.user(scope=TokenScope.DATA_READ, cookie=True)
     @autoDescribeRoute(
         Description("Fichiers de l'item, DANS L'ORDRE DES COUPES.").modelParam(
             "id", model=Item, level=AccessType.READ
@@ -211,7 +214,7 @@ class DmfResource(Resource):
                 logger.exception("[dmf] NumberOfFrames non mémorisé sur l'item %s", item["_id"])
         return files
 
-    @access.user(cookie=True)
+    @access.user(scope=TokenScope.DATA_READ, cookie=True)
     @autoDescribeRoute(
         Description("Métadonnées DICOM communes de l'item (vide si non-DICOM).").modelParam(
             "id", model=Item, level=AccessType.READ
@@ -220,7 +223,7 @@ class DmfResource(Resource):
     def getDicom(self, item):
         return (item.get("dicom") or {}).get("meta", {})
 
-    @access.user(cookie=True)
+    @access.user(scope=TokenScope.DATA_READ, cookie=True)
     @autoDescribeRoute(
         Description("Mesures de l'item (raccourci = liste filtrée par item).").modelParam(
             "id", model=Item, level=AccessType.READ
@@ -231,7 +234,7 @@ class DmfResource(Resource):
 
     # --- Collection d'annotations -----------------------------------------
 
-    @access.user(cookie=True)
+    @access.user(scope=TokenScope.DATA_READ, cookie=True)
     @autoDescribeRoute(
         Description("Liste les annotations (interrogeable par item / dossier / type / créateur).")
         .param("itemId", "Filtrer par item (accès vérifié).", required=False)
@@ -338,7 +341,7 @@ class DmfResource(Resource):
 
     # --- Pixels ------------------------------------------------------------
 
-    @access.user(cookie=True)
+    @access.user(scope=TokenScope.DATA_READ, cookie=True)
     @autoDescribeRoute(
         Description(
             "Télécharge le fichier (pixels DICOM), avec contrôle d'accès. Les pixels non "
@@ -348,7 +351,7 @@ class DmfResource(Resource):
     def downloadFile(self, file):
         return serveFile(file)
 
-    @access.user(cookie=True)
+    @access.user(scope=TokenScope.DATA_READ, cookie=True)
     @autoDescribeRoute(
         Description(
             "Télécharge UNE frame d'un fichier multi-frame, sous forme de DICOM mono-frame "

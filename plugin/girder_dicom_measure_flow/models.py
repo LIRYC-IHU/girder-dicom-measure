@@ -71,6 +71,8 @@ class Annotation(Model):
         out.update(
             {
                 "id": doc.get("key"),
+                # Indispensable aux listes par dossier (`?folderId=`) : relie la mesure à son image.
+                "itemId": str(doc["itemId"]) if doc.get("itemId") else None,
                 "user": {
                     "id": str(doc["creatorId"]) if doc.get("creatorId") else None,
                     "login": doc.get("creatorLogin"),
