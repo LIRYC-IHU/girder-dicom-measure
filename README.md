@@ -243,6 +243,36 @@ Chaque mesure a la forme :
 }
 ```
 
+### Résumé des mesures dans l'item (`item.dmf`)
+
+Depuis la 0.5.0, chaque examen annoté porte aussi un **résumé de ses mesures** dans le
+champ `dmf` de l'item, recalculé par le serveur à chaque création, modification ou
+suppression. La collection reste la source de vérité ; le résumé la rend visible à tout
+client générique de Girder (`GET /item`, scripts d'analyse, assistant
+[girder-mcp](https://github.com/LIRYC-IHU/girder-mcp) avec la racine `dmf`) sans passer
+par les routes `/dmf`. Il est lisible par quiconque lit l'examen, comme les mesures
+elles-mêmes, et n'est pas modifiable par le client.
+
+```jsonc
+"dmf": {
+  "v": 1,
+  "count": 2,                       // nombre de mesures
+  "types": ["distance"],
+  "labels": ["VD", "VG"],           // libellés non vides
+  "truncated": false,               // true au-delà de 2000 mesures (count reste exact)
+  "updated": "ISO-8601",
+  "measurements": [                 // une entrée plate par mesure, sans géométrie
+    { "key": "…", "type": "distance", "label": "VD", "lengthMm": 31.5, "lengthPx": 63,
+      "positionPx": null, "spacingSource": "PixelSpacing", "frameIndex": 0,
+      "seriesInstanceUID": "…", "sopInstanceUID": "…", "creatorLogin": "alice",
+      "created": "ISO-8601" }
+  ]
+}
+```
+
+Les résumés manquants (mesures antérieures à la 0.5.0) sont calculés au démarrage du
+plugin.
+
 ## Déploiement en production
 
 - Servir Girder derrière **HTTPS** (reverse-proxy). Veiller à ce que Girder voie l'hôte

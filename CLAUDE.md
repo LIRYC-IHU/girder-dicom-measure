@@ -241,6 +241,20 @@ date sont **estampillés serveur** (utilisateur authentifié), pas pris du clien
 > Historique : les mesures vivaient dans `item.meta.annotations` ; une migration one-way au
 > chargement du plugin les déplace vers la collection et retire la clé `meta.annotations`.
 
+**Résumé dénormalisé `item.dmf`** (0.5.0, `summary.py` pur + `models.syncItemSummary`) :
+projection EN LECTURE SEULE de la collection, exposée au niveau READ, pour que tout client
+générique de Girder (filtres `GET /item`, girder-mcp avec la racine `dmf`) voie les mesures.
+- Recalcul COMPLET depuis la collection à chaque `Annotation.save/remove` (surchargés : tout
+  chemin d'écriture est couvert, migration comprise) ; résumé retiré quand il n'y a plus de
+  mesure. Écriture par `$set`/`$unset` ciblé, JAMAIS `Item().save()` (écraserait une
+  modification concurrente de l'item, et inversement : la migration fait un `$unset` de
+  `meta.annotations` pour ne pas effacer le résumé posé juste avant).
+- Entrées PLATES (`lengthMm`… remontés hors de `values`), sans géométrie, bornées à
+  `MAX_MEASUREMENTS` (`truncated`) ; `count`/`types`/`labels` sur toutes les mesures.
+- `v` = `SUMMARY_VERSION` : à incrémenter à tout changement de forme ; le backfill du
+  démarrage (`backfillItemSummaries`) recalcule les items annotés d'une autre version et
+  retire les résumés orphelins.
+
 Format renvoyé/attendu côté client (la `key` du document = `id`) :
 
 ```jsonc

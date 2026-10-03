@@ -3,7 +3,9 @@
 Rôles (cf. CLAUDE.md) :
   1. Extraction automatique des métadonnées DICOM à l'upload (réplique `dicom_viewer`)
      + tri des instances → `dicom_metadata.handleUploadedDicom` (event `data.process`).
-  2. Exposition du champ `dicom` de l'item via l'API REST (le client lit l'ordre trié).
+  2. Exposition du champ `dicom` de l'item via l'API REST (le client lit l'ordre trié), et
+     du résumé des mesures `dmf` (projection de la collection `dmf_annotation`, cf.
+     summary.py) : les mesures deviennent interrogeables par tout client de Girder.
   3. Routes dédiées `/api/v1/dmf/*` (auth cookie) + service de la SPA sous le chemin
      configurable `dmf.viewer_path` (défaut `/dmf`).
   4. Intégration dans la vue item du client web Girder (`girder-link.js`), déclarée via
@@ -22,7 +24,7 @@ from girder.models.setting import Setting
 from girder.plugin import GirderPlugin, registerPluginStaticContent
 
 from .dicom_metadata import handleUploadedDicom
-from .models import migrateFromItemMetadata
+from .models import backfillItemSummaries, migrateFromItemMetadata
 from .rest import DmfResource
 from .settings import PluginSettings
 from .spa import SpaServer
@@ -40,6 +42,9 @@ class DicomMeasureFlowPlugin(GirderPlugin):
         events.bind("data.process", "dicom_measure_flow", handleUploadedDicom)
         # 2 : rendre le champ `dicom` (méta communes + ordre des fichiers) lisible via REST.
         Item().exposeFields(level=AccessType.READ, fields="dicom")
+        # Résumé des mesures, lisible par quiconque lit l'item (même règle que
+        # GET /dmf/item/:id/annotations) ; jamais écrit par le client.
+        Item().exposeFields(level=AccessType.READ, fields="dmf")
         # Recherche des doublons par empreinte des pixels (GET /dmf/pixelhash/:hash).
         Item().ensureIndices(["dicom.files.dicom.PixelDataSHA256"])
 
@@ -52,6 +57,11 @@ class DicomMeasureFlowPlugin(GirderPlugin):
             migrateFromItemMetadata()
         except Exception as exc:  # ne jamais bloquer le démarrage
             cherrypy.log("[dicom_measure_flow] migration annotations ignorée : %r" % exc)
+        # Résumés `item.dmf` manquants (annotations antérieures à 0.5.0) ou périmés.
+        try:
+            backfillItemSummaries()
+        except Exception as exc:
+            cherrypy.log("[dicom_measure_flow] backfill des résumés ignoré : %r" % exc)
 
         # 3 : servir la SPA sous le chemin configurable (défaut /dmf).
         # IMPORTANT : monter sur `info['serverRoot']` (l'arbre cherrypy réellement servi

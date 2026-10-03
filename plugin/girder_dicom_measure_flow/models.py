@@ -7,6 +7,9 @@ le contrôle d'accès se fait via l'item (cf. rest.py).
 
 Le champ `key` = identifiant CLIENT de la mesure (uuid / annotationUID Cornerstone) : il sert
 de clé stable pour le CRUD côté client (pas de remapping avec l'_id Mongo).
+
+Toute écriture (`save`/`remove`) recalcule le résumé dénormalisé `item.dmf` de l'item
+concerné (cf. summary.py) : la collection fait foi, le résumé en est une projection.
 """
 
 import datetime
@@ -14,6 +17,8 @@ import logging
 
 from girder.models.item import Item
 from girder.models.model_base import Model
+
+from .summary import SUMMARY_VERSION, buildSummary
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +51,16 @@ class Annotation(Model):
 
     def listForItem(self, itemId, **kwargs):
         return self.find({"itemId": itemId}, sort=[("created", 1)], **kwargs)
+
+    def save(self, document, *args, **kwargs):
+        document = super().save(document, *args, **kwargs)
+        syncItemSummary(document.get("itemId"))
+        return document
+
+    def remove(self, document, *args, **kwargs):
+        result = super().remove(document, *args, **kwargs)
+        syncItemSummary(document.get("itemId"))
+        return result
 
     def fromMeasurement(self, measurement, item, user):
         """Mesure client → document de la collection (creator/date serveur, source de vérité)."""
@@ -116,8 +131,52 @@ def migrateFromItemMetadata():
             doc.setdefault("frameIndex", 0)
             model.save(doc)
             migrated += 1
-        # Source historique retirée (la collection fait foi désormais).
-        del item["meta"]["annotations"]
-        Item().save(item)
+        # Source historique retirée (la collection fait foi désormais). `$unset` atomique
+        # et non `Item().save(item)` : ce document a été lu AVANT les `model.save` ci-dessus,
+        # le réécrire en entier effacerait le résumé `dmf` qu'ils viennent de poser.
+        Item().update({"_id": item["_id"]}, {"$unset": {"meta.annotations": ""}})
     if migrated:
         logger.info("[dicom_measure_flow] %d annotation(s) migrées depuis item.meta", migrated)
+
+
+def syncItemSummary(itemId):
+    """Recalcule `item.dmf` depuis la collection (source de vérité) ; le retire si vide.
+
+    Recalcul COMPLET plutôt qu'incrémental : idempotent, et deux écritures concurrentes sur
+    le même item convergent vers l'état de la collection. `$set`/`$unset` ciblés (jamais
+    `Item().save`) pour ne pas écraser une modification concurrente des autres champs.
+    """
+    if itemId is None:
+        return
+    summary = buildSummary(
+        Annotation().listForItem(itemId), datetime.datetime.now(datetime.timezone.utc)
+    )
+    if summary is None:
+        Item().update({"_id": itemId}, {"$unset": {"dmf": ""}})
+    else:
+        Item().update({"_id": itemId}, {"$set": {"dmf": summary}})
+
+
+def backfillItemSummaries():
+    """Au démarrage : résumés manquants ou d'une autre version, résumés orphelins retirés.
+
+    Couvre les annotations écrites avant l'apparition du résumé (plugin < 0.5.0) et les
+    changements de forme (SUMMARY_VERSION). Ne touche que les items concernés.
+    """
+    annotated = Annotation().collection.distinct("itemId")
+    stale = Item().find(
+        {"_id": {"$in": annotated}, "dmf.v": {"$ne": SUMMARY_VERSION}}, fields=["_id"]
+    )
+    count = 0
+    for item in stale:
+        syncItemSummary(item["_id"])
+        count += 1
+    orphans = Item().update(
+        {"dmf": {"$exists": True}, "_id": {"$nin": annotated}}, {"$unset": {"dmf": ""}}
+    )
+    if count or orphans.modified_count:
+        logger.info(
+            "[dicom_measure_flow] résumés de mesures : %d recalculé(s), %d orphelin(s) retiré(s)",
+            count,
+            orphans.modified_count,
+        )
