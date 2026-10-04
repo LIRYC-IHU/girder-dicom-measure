@@ -206,6 +206,15 @@ autres) : transparent pour la SPA, qui ne voit qu'une session.
 - **Backfill** : `POST /api/v1/dmf/reprocess[?folderId=]` (admin) retraite les items DICOM
   existants (extraction + tri) → couvre les uploads antérieurs à l'install. `processItem`
   reconstruit `item['dicom']` from scratch.
+- **Indexation concurrente** : `data.process` tourne dans le thread de la requête d'upload, donc
+  les fichiers d'une série envoyés EN PARALLÈLE indexent le même item simultanément. Toute
+  écriture de `item.dicom` est ciblée (`$set`, JAMAIS `Item().save()`) et incrémente la révision
+  `dmfDicomRev` (champ de 1er niveau, non exposé) ; `handleUploadedDicom` relit puis n'écrit que
+  si la révision n'a pas bougé, sinon rejoue (lire-modifier-`save` = entrées de `files` perdues,
+  constaté : 24 uploads parallèles → 1 entrée). Le tri reste fait en Python (`sort_key`, `None`
+  en dernier — un `$push`/`$sort` Mongo les mettrait en premier). Idem pour le cache
+  `NumberOfFrames` de `getFiles` (`rememberDeclaredFrames`, `$set` positionnel). Les clients
+  d'upload peuvent donc paralléliser au sein d'un item.
 
 ### Limitations connues / TODO
 
@@ -289,7 +298,10 @@ réécriture de liste globale.
 - **Qualité (CI GitHub Actions, `.github/workflows/ci.yml`)** :
   - SPA (`web/`) : `npm run lint` (ESLint flat config `eslint.config.js`), `npm run typecheck`,
     `npm test` (Vitest, jsdom), `npm run build`.
-  - Plugin (`plugin/`) : `py_compile` + `pytest` (`tests/`, déps `pip install .[test]`).
+  - Plugin (`plugin/`) : `py_compile` + `pytest` (`tests/`, déps `pip install .[test]`) ;
+    `make test` à la racine. Les tests d'intégration (`test_dicom_metadata_concurrency.py`,
+    Girder + MongoDB réels, base jetable) exigent `girder` installé et un Mongo sur
+    `DMF_TEST_MONGO_URI` (service `mongo` en CI) ; sinon ils sont ignorés.
 - **Tests** : côté plugin, les fonctions DICOM pures sont isolées dans `dicom_tags.py` et
   `transcode.py` (sans dépendance Girder/Mongo) → testables avec pydicom seul. Côté SPA, helpers `measurements` et
   `store` (Cornerstone/girder mockés).

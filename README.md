@@ -297,7 +297,8 @@ make build     # compile la SPA et l'embarque dans le plugin
 - SPA : **Vite + React + Cornerstone3D** (`web/`).
 - Plugin Girder : **Python** (`plugin/`) — extraction DICOM, tri, routes API, service de la SPA.
 - Lint / typecheck / tests : `cd web && npm run lint && npm run typecheck && npm test` ;
-  côté plugin : `cd plugin && pytest`.
+  côté plugin : `make test` (intégration Girder ignorée sans `girder` installé ni MongoDB sur
+  `DMF_TEST_MONGO_URI`).
 - **Mode autonome** (sans Girder) pour tester avec des fichiers locaux placés dans
   `test_data/<étude>/*.dcm` : ouvrir `http://localhost:5173/?standalone=CT`
   (les mesures sont alors stockées dans le `localStorage`).
