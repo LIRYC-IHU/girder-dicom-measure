@@ -29,7 +29,7 @@ from girder.models.folder import Folder
 from girder.models.item import Item
 from girder.models.setting import Setting
 
-from .dicom_metadata import processItem
+from .dicom_metadata import processItem, rememberDeclaredFrames
 from .models import Annotation
 from .settings import DEFAULTS, PluginSettings
 from .streaming import (
@@ -191,15 +191,14 @@ class DmfResource(Resource):
         # résultat : sans ça, soit on resonde à chaque ouverture (une série CT de 300 coupes
         # coûterait une seconde à chaque fois), soit — ce qui était le cas — on suppose
         # « mono-frame » pour tout item multi-fichiers et les boucles ne sont jamais découpées.
-        learned = False
+        learned = {}
         files = []
         for fileId, name, entry in docs:
             declared = ((entry or {}).get("dicom") or {}).get("NumberOfFrames")
             if declared is None:
                 declared = probeDeclaredFrames(File().load(fileId, force=True))
                 if entry is not None:
-                    entry.setdefault("dicom", {})["NumberOfFrames"] = declared
-                    learned = True
+                    learned[entry["_id"]] = declared
             # Le nombre DÉCLARÉ ne dit pas que la découpe s'applique (source déjà compressée,
             # transcodage désactivé…) : seul `frameCount` tranche, et il relit l'en-tête.
             frames = 1
@@ -209,7 +208,9 @@ class DmfResource(Resource):
 
         if learned:
             try:
-                Item().save(item)
+                # Ciblé, jamais `Item().save(item)` : cet item a été lu au début de la requête,
+                # le réécrire effacerait les fichiers indexés entre-temps (série en cours d'upload).
+                rememberDeclaredFrames(item["_id"], learned)
             except Exception:
                 # Le cache de métadonnées est un confort : son échec ne doit pas priver le
                 # client de sa liste de fichiers.

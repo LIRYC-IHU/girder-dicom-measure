@@ -34,6 +34,13 @@ jobs:
     defaults:
       run:
         working-directory: plugin
+    # Tests d'intégration (indexation concurrente d'un item) : Girder réel sur ce MongoDB.
+    services:
+      mongo:
+        image: mongo:7
+        ports: ['27017:27017']
+    env:
+      DMF_TEST_MONGO_URI: mongodb://localhost:27017
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,6 +49,8 @@ jobs:
       # Encodeurs utilisés par le transcodage des pixels (cf. transcode.py) : sans eux, les
       # tests de compression seraient silencieusement dégradés.
       - run: pip install pydicom numpy pyjpegls pylibjpeg pylibjpeg-openjpeg pytest
+      # Sans girder, les tests d'intégration sont ignorés en silence.
+      - run: pip install 'girder>=5'
       - run: python -m py_compile girder_dicom_measure_flow/*.py
       - run: python -m pytest -q
 

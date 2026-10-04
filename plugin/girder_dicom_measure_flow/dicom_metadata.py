@@ -17,6 +17,9 @@ plugin soit autosuffisant (pas de dépendance à `dicom_viewer`) :
 
 Le champ `dicom` est exposé en lecture via l'API REST (cf. __init__.py).
 
+Écritures de `dicom` ATOMIQUES, jamais par `Item().save()` : les uploads parallèles d'une
+série indexent le même item en même temps (cf. `handleUploadedDicom`, `REVISION_FIELD`).
+
 `PixelDataSHA256` = empreinte de la donnée pixel (hors en-tête, cf. `transcode.pixelDataDigest`),
 calculée à CHAQUE réception d'un fichier : elle permet de repérer une même image envoyée
 plusieurs fois, y compris sous un autre patient ou dans un autre cas (`GET /dmf/pixelhash/:hash`).
@@ -33,6 +36,14 @@ from .dicom_tags import coerce_metadata, sort_key
 from .transcode import pixelDataDigest
 
 logger = logging.getLogger("girder.dicom_measure_flow")
+
+# Révision de `item['dicom']`, incrémentée à CHAQUE écriture de ce champ : l'indexation d'un
+# fichier n'écrit que si elle n'a pas bougé depuis sa lecture (cf. handleUploadedDicom).
+# Champ de premier niveau, hors de `dicom` : non exposé par l'API (liste blanche de l'item).
+REVISION_FIELD = "dmfDicomRev"
+# Chaque tour perdu l'est au profit d'un autre écrivain qui, lui, a abouti : il en faudrait
+# autant d'uploads simultanés dans le MÊME item pour épuiser la borne.
+MAX_WRITE_ATTEMPTS = 100
 
 
 def _parseFile(f):
@@ -82,31 +93,89 @@ def _extractFileData(file, dicomMeta, pixelHash=None):
     }
 
 
+def _mergeFile(dicom, file, fileMetadata, pixelHash):
+    """Nouvel état de `item['dicom']` après réception d'un fichier (pur, sans écriture).
+
+    Idempotent : une éventuelle entrée existante de ce fichier (re-upload, ou `dicom_viewer`
+    officiel aussi installé) est remplacée, pas dupliquée.
+    """
+    if dicom is None:
+        meta, files = fileMetadata, []
+    else:
+        meta = _removeUniqueMetadata(dicom.get("meta") or {}, fileMetadata)
+        files = [x for x in dicom.get("files", []) if x.get("_id") != file["_id"]]
+    files.append(_extractFileData(file, fileMetadata, pixelHash))
+    # Tri Python et non `$push`/`$sort` Mongo : celui-ci range les valeurs manquantes EN
+    # PREMIER, `sort_key` en dernier.
+    files.sort(key=sort_key)
+    return {"meta": meta, "files": files}
+
+
+def _writeDicom(itemId, dicom, expectedRevision):
+    """Écrit `item['dicom']` SEULEMENT si sa révision n'a pas bougé depuis la lecture.
+
+    `$set` ciblé : les autres champs de l'item (meta, taille, résumé `dmf`…) ne sont jamais
+    réécrits. Renvoie False si un autre écrivain est passé entre-temps (ou item supprimé).
+    """
+    result = Item().update(
+        # `{champ: None}` matche aussi un champ absent : item jamais indexé par cette version.
+        {"_id": itemId, REVISION_FIELD: expectedRevision},
+        {"$set": {"dicom": dicom}, "$inc": {REVISION_FIELD: 1}},
+        multi=False,
+    )
+    return result.matched_count == 1
+
+
 def handleUploadedDicom(event):
-    """Handler `data.process` : extrait les métadonnées et range/trie l'item."""
+    """Handler `data.process` : extrait les métadonnées et range/trie l'item.
+
+    Girder déclenche `data.process` dans le thread de la requête d'upload : les fichiers d'une
+    même série envoyés EN PARALLÈLE indexent le même item en même temps. Un lire-modifier-
+    `Item().save()` perdrait alors des entrées de `files` (et écraserait les autres champs de
+    l'item). D'où une écriture conditionnelle sur la révision de `dicom`, rejouée tant qu'un
+    autre écrivain passe entre la lecture et l'écriture.
+    """
     file = event.info["file"]
+    if not file.get("itemId"):
+        return
     fileMetadata = _parseFile(file)
     if fileMetadata is None:
         return
+    # Hors de la boucle : c'est la partie lente (lecture des pixels), et elle ne dépend pas
+    # de l'état de l'item.
+    pixelHash = _pixelHash(file)
 
-    item = Item().load(file["itemId"], force=True)
-    if item is None:
-        return
+    for _ in range(MAX_WRITE_ATTEMPTS):
+        current = Item().collection.find_one(
+            {"_id": file["itemId"]}, {"dicom": True, REVISION_FIELD: True}
+        )
+        if current is None:
+            return
+        dicom = _mergeFile(current.get("dicom"), file, fileMetadata, pixelHash)
+        if _writeDicom(file["itemId"], dicom, current.get(REVISION_FIELD)):
+            return
+    # Ne pas faire échouer l'upload (le fichier est bien reçu) ; `POST /dmf/reprocess` réindexe.
+    logger.error(
+        "[dmf] indexation DICOM abandonnée pour %s (item %s) : %d écritures concurrentes",
+        file.get("name"),
+        file["itemId"],
+        MAX_WRITE_ATTEMPTS,
+    )
 
-    if "dicom" in item:
-        item["dicom"]["meta"] = _removeUniqueMetadata(item["dicom"]["meta"], fileMetadata)
-    else:
-        item["dicom"] = {"meta": fileMetadata, "files": []}
 
-    # Idempotent : on retire une éventuelle entrée existante de ce fichier (re-upload,
-    # ou si `dicom_viewer` officiel est aussi installé) avant de ré-ajouter.
-    item["dicom"]["files"] = [
-        x for x in item["dicom"]["files"] if x.get("_id") != file["_id"]
-    ]
-    item["dicom"]["files"].append(_extractFileData(file, fileMetadata, _pixelHash(file)))
-    item["dicom"]["files"].sort(key=sort_key)
-
-    Item().save(item)
+def rememberDeclaredFrames(itemId, declared):
+    """Mémorise `NumberOfFrames` sondé a posteriori ({fileId: n}) dans les entrées EXISTANTES
+    de `item.dicom.files`. Mise à jour ciblée de l'entrée (jamais `Item().save()`, qui
+    écraserait une indexation concurrente) ; une entrée disparue entre-temps est ignorée."""
+    for fileId, frames in declared.items():
+        Item().update(
+            {"_id": itemId, "dicom.files._id": fileId},
+            {
+                "$set": {"dicom.files.$.dicom.NumberOfFrames": frames},
+                "$inc": {REVISION_FIELD: 1},
+            },
+            multi=False,
+        )
 
 
 def _knownHashes(item):
@@ -142,5 +211,12 @@ def processItem(item, rehash=False):
         return False
     dicom["files"].sort(key=sort_key)
     item["dicom"] = dicom
-    Item().save(item)
+    # Écriture inconditionnelle (reconstruction complète), mais ciblée : pas d'`Item().save()`
+    # d'un document lu plus tôt, qui écraserait les autres champs. La révision avance, ce qui
+    # fait rejouer une indexation `data.process` concurrente sur ce nouvel état.
+    Item().update(
+        {"_id": item["_id"]},
+        {"$set": {"dicom": dicom}, "$inc": {REVISION_FIELD: 1}},
+        multi=False,
+    )
     return True
