@@ -7,60 +7,24 @@ perdue, aucune modification concurrente des autres champs de l'item écrasée.
 
 Nécessite `girder` installé et un MongoDB joignable (`DMF_TEST_MONGO_URI`, défaut
 `mongodb://localhost:27017`) ; sinon les tests sont ignorés. Chaque exécution travaille dans
-une base jetable (`dmf_test_<aléa>`), supprimée à la fin.
+une base jetable (`dmf_test_<aléa>`), supprimée à la fin (fixture `girder`, cf. conftest.py).
 """
 
 import importlib.util
 import io
-import os
 import threading
-import uuid
 
 import pytest
 
 if importlib.util.find_spec("girder") is None:
     pytest.skip("girder non installé", allow_module_level=True)
 
-import pymongo  # noqa: E402  (dépendance de girder)
 from pydicom.dataset import Dataset, FileMetaDataset  # noqa: E402
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid  # noqa: E402
 
-MONGO_URI = os.environ.get("DMF_TEST_MONGO_URI", "mongodb://localhost:27017")
+# Fixture `girder` (base jetable, utilisateur, dossier, handler `data.process`) : conftest.py.
 STUDY_UID = generate_uid()
 SERIES_UID = generate_uid()
-
-
-@pytest.fixture(scope="module")
-def girder(tmp_path_factory):
-    client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=1000)
-    try:
-        client.admin.command("ping")
-    except pymongo.errors.PyMongoError:
-        pytest.skip("MongoDB injoignable sur %s" % MONGO_URI)
-
-    dbName = "dmf_test_%s" % uuid.uuid4().hex[:12]
-    # Après l'import de girder (qui charge sa config) mais avant tout accès à un modèle :
-    # la connexion est ouverte à la première instanciation, avec l'URI de la config cherrypy.
-    import cherrypy
-    from girder import events
-
-    cherrypy.config["database"]["uri"] = "%s/%s" % (MONGO_URI.rstrip("/"), dbName)
-
-    from girder.models.assetstore import Assetstore
-    from girder.models.folder import Folder
-    from girder.models.user import User
-
-    from girder_dicom_measure_flow.dicom_metadata import handleUploadedDicom
-
-    Assetstore().createFilesystemAssetstore("test", str(tmp_path_factory.mktemp("assetstore")))
-    user = User().createUser("admin", "password", "Admin", "Test", "admin@example.com")
-    folder = Folder().createFolder(user, "data", parentType="user", creator=user)
-    events.bind("data.process", "dmf_test", handleUploadedDicom)
-    try:
-        yield {"user": user, "folder": folder}
-    finally:
-        events.unbind("data.process", "dmf_test")
-        client.drop_database(dbName)
 
 
 def _dicom(instance):
@@ -224,7 +188,7 @@ def test_process_item_rebuilds_dicom_without_touching_other_fields(girder):
     # Après la lecture par le backfill : index abîmé + écriture d'un autre champ.
     Item().update({"_id": item["_id"]}, {"$set": {"dicom.files": [], "meta.reviewed": True}})
 
-    assert processItem(stale) is True
+    assert processItem(stale) is not None
 
     reloaded = _reload(item)
     assert [f["dicom"]["InstanceNumber"] for f in reloaded["dicom"]["files"]] == [1, 2, 3]

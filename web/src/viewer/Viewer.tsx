@@ -16,6 +16,7 @@ import {
 } from '@cornerstonejs/tools';
 import { ensureCornerstoneInitialized, buildStackImageIds } from './cornerstoneSetup';
 import { prefetchStack } from './prefetch';
+import { isImageDisplayed, failedImageId, type DisplayedImageSource } from './imageGuard';
 import { createWheelStepper } from './wheelScroll';
 import { resolvePixelSpacing, isNonAnatomicScale, readDicomInfo } from './measurements';
 import {
@@ -55,6 +56,12 @@ const TOOL_NAME: Partial<Record<ActiveTool, string>> = {
 function isLevelTool(t: ActiveTool): t is 'level-h' | 'level-v' {
   return t === 'level-h' || t === 'level-v';
 }
+
+// Outils qui CRÉENT une mesure : neutralisés tant que la coupe courante n'a pas d'image.
+const MEASURING_TOOLS: ActiveTool[] = ['distance', 'point', 'level-h', 'level-v'];
+
+const REFUSED_NOTICE =
+  "Mesure refusée : l'image de cette coupe n'est pas chargée (ce qui est à l'écran est une autre coupe).";
 
 interface ViewerProps {
   /** URLs de téléchargement Girder, dans l'ordre des slices. */
@@ -97,6 +104,10 @@ export function Viewer({
   // noir et muet pendant ce temps se lit comme une panne.
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // La coupe courante n'a PAS pu être chargée (objet sans pixels, 404, décodage…) : l'écran
+  // montre encore la coupe précédente → aucune mesure possible (cf. imageGuard.ts).
+  const [unavailable, setUnavailable] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -108,7 +119,18 @@ export function Viewer({
     let hydrating = true;
     const modifyTimers = new Map<string, ReturnType<typeof setTimeout>>();
     const cleanups: Array<() => void> = [];
+    // Annotations Cornerstone retirées par la garde : leur ANNOTATION_REMOVED ne doit pas
+    // déclencher de suppression côté serveur (elles n'y ont jamais été créées).
+    const refused = new Set<string>();
+    let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+    const flashNotice = (text: string) => {
+      setNotice(text);
+      clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => setNotice(null), 5000);
+    };
+    cleanups.push(() => clearTimeout(noticeTimer));
 
+    setUnavailable(false);
     setLoading(true);
     (async () => {
       try {
@@ -124,10 +146,37 @@ export function Viewer({
         });
 
         const viewport = engine.getViewport(VIEWPORT_ID) as Types.IStackViewport;
+        // L'image affichée est-elle celle de la coupe `imageId` ? (cf. imageGuard.ts)
+        const displayed = (imageId: string | null | undefined) =>
+          isImageDisplayed(viewport as unknown as DisplayedImageSource, imageId);
+
+        // Échec de chargement de la coupe COURANTE : Cornerstone garde l'image précédente à
+        // l'écran mais l'index pointe sur la coupe en échec. Écouté AVANT `setStack` : la
+        // première coupe peut échouer.
+        const onLoadError = (evt: Event) => {
+          const id = failedImageId((evt as CustomEvent).detail);
+          if (!id || id !== viewport.getCurrentImageId()) return;
+          setUnavailable(true);
+          onFrameChange?.(viewport.getCurrentImageIdIndex());
+        };
+        eventTarget.addEventListener(CoreEnums.Events.IMAGE_LOAD_ERROR, onLoadError);
+        cleanups.push(() =>
+          eventTarget.removeEventListener(CoreEnums.Events.IMAGE_LOAD_ERROR, onLoadError),
+        );
+
         // Série multi-fichiers OU fichier multiframe (fluoro cine) → liste d'imageIds.
         const imageIds = await buildStackImageIds(fileUrls);
         if (disposed) return;
-        await viewport.setStack(imageIds, 0);
+        if (imageIds.length === 0) throw new Error('Aucune image affichable dans cet item.');
+        try {
+          await viewport.setStack(imageIds, 0);
+        } catch {
+          // Première coupe illisible : le rendu GPU résout quand même `setStack`, le rendu
+          // CPU le rejette. Dans les deux cas le stack est en place et les autres coupes
+          // restent consultables → bannière plutôt que viewer en erreur.
+        }
+        if (disposed) return;
+        if (!displayed(viewport.getCurrentImageId())) setUnavailable(true);
         onStackReady?.(imageIds.length);
         engine.resize(true); // garantit le dimensionnement du canvas après le layout
         viewport.render();
@@ -219,6 +268,7 @@ export function Viewer({
         cleanups.push(() => resizeObserver.disconnect());
 
         const onNewImage = () => {
+          setUnavailable(false);
           onFrameChange?.(viewport.getCurrentImageIdIndex());
           refreshSpacing();
         };
@@ -233,6 +283,10 @@ export function Viewer({
           if (!isLevelTool(tool)) return;
           const id = viewport.getCurrentImageId();
           if (!id) return;
+          if (!displayed(id)) {
+            flashNotice(REFUSED_NOTICE);
+            return;
+          }
           const world = viewport.canvasToWorld([e.offsetX, e.offsetY]);
           const px = worldToPixel(viewport, id, world);
           if (!px) return;
@@ -265,6 +319,15 @@ export function Viewer({
         const onCompleted = (evt: Event) => {
           if (hydrating) return;
           const ann = (evt as CustomEvent).detail?.annotation;
+          // Garde : une mesure dont l'image n'est pas celle affichée est tracée sur une AUTRE
+          // coupe que celle qu'elle référencerait → retirée, jamais enregistrée.
+          if (ann?.annotationUID && !displayed(ann.metadata?.referencedImageId)) {
+            refused.add(ann.annotationUID as string);
+            csAnnotation.state.removeAnnotation(ann.annotationUID as string);
+            viewport.render();
+            flashNotice(REFUSED_NOTICE);
+            return;
+          }
           const m = ann && annotationToMeasurement(ann, viewport, user);
           if (m) {
             void store.add(m);
@@ -283,6 +346,9 @@ export function Viewer({
           modifyTimers.set(
             uid,
             setTimeout(() => {
+              // Poignée déplacée alors que l'image de la mesure n'est pas à l'écran : la
+              // nouvelle géométrie serait relative à une autre image → non enregistrée.
+              if (!displayed(ann.metadata?.referencedImageId)) return;
               const m = annotationToMeasurement(ann, viewport, user);
               if (m) void store.update(m.id, { geometry: m.geometry, values: m.values });
             }, 300),
@@ -290,7 +356,9 @@ export function Viewer({
         };
         const onRemoved = (evt: Event) => {
           const ann = (evt as CustomEvent).detail?.annotation;
-          if (ann?.annotationUID) void store.remove(ann.annotationUID as string);
+          if (!ann?.annotationUID) return;
+          if (refused.delete(ann.annotationUID as string)) return;
+          void store.remove(ann.annotationUID as string);
         };
 
         eventTarget.addEventListener(ToolEnums.Events.ANNOTATION_COMPLETED, onCompleted);
@@ -353,9 +421,12 @@ export function Viewer({
     const toolGroup = ToolGroupManager.getToolGroup(TOOL_GROUP_ID);
     if (!toolGroup) return;
     // Pour un niveau (géré au clic, hors Cornerstone) : tous les outils Cornerstone passifs.
+    // Coupe sans image : les outils de mesure restent passifs (pas de tracé possible), la
+    // navigation (déplacer/zoom) reste active.
+    const blocked = unavailable && MEASURING_TOOLS.includes(activeTool);
     (Object.keys(TOOL_NAME) as ActiveTool[]).forEach((key) => {
       const toolName = TOOL_NAME[key]!;
-      if (!isLevelTool(activeTool) && key === activeTool) {
+      if (!blocked && !isLevelTool(activeTool) && key === activeTool) {
         toolGroup.setToolActive(toolName, {
           bindings: [{ mouseButton: ToolEnums.MouseBindings.Primary }],
         });
@@ -363,13 +434,24 @@ export function Viewer({
         toolGroup.setToolPassive(toolName);
       }
     });
-  }, [activeTool, toolsReady]);
+  }, [activeTool, toolsReady, unavailable]);
 
   if (error) return <div className="error">Erreur viewer : {error}</div>;
 
   return (
     <div className="viewport">
-      {isNonAnatomicScale(spacingSource) && (
+      {unavailable && (
+        <div className="banner banner-error" role="alert">
+          Image de cette coupe non affichable — aucune mesure possible ici. L'image visible est
+          celle d'une autre coupe.
+        </div>
+      )}
+      {notice && !unavailable && (
+        <div className="banner banner-error" role="alert">
+          {notice}
+        </div>
+      )}
+      {!unavailable && !notice && isNonAnatomicScale(spacingSource) && (
         <div className="banner">
           ⚠️ Échelle au plan détecteur (ImagerPixelSpacing) — la mesure en mm n'est pas une
           dimension anatomique réelle (magnification non corrigée).

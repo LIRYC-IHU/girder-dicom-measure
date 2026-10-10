@@ -181,6 +181,10 @@ curl -H "Girder-Token: $TOKEN" -X PUT "$GIRDER/api/v1/system/setting" \
    | Déplacer / Zoom | —         | boutons de la barre d'outils  |
 
 - **Molette** ou **↑ / ↓** : changer de coupe.
+- Seules les **images** sont empilées : les objets DICOM sans pixels rangés dans le même item
+  (état de présentation PR, rapport structuré SR, sélection KO, DICOMDIR…) n'apparaissent pas
+  comme coupes. Si une coupe ne peut pas être chargée malgré tout, un bandeau rouge le signale
+  et **aucune mesure n'y est possible** (l'image encore à l'écran est celle d'une autre coupe).
 - Panneau de droite : liste des mesures (label éditable, suppression, clic pour aller à la
   coupe correspondante) et infos DICOM de la coupe courante.
 - **Plein écran** ; **← Girder** pour revenir à l'item.
@@ -216,6 +220,21 @@ curl -H "Girder-Token: $TOKEN" -X POST -d '' "$GIRDER/api/v1/dmf/reprocess"
 curl -H "Girder-Token: $TOKEN" -X POST -d '' "$GIRDER/api/v1/dmf/reprocess?folderId=$FOLDER"
 ```
 
+**Mise à jour vers 0.6.0** — les items indexés avant 0.6.0 empilent encore leurs objets sans
+pixels (PR, SR…) comme une coupe (en général la coupe 1). `reprocess` les sort de la pile et
+**renumérote les `frameIndex`** des mesures de ces items (une mesure posée après l'objet
+recule d'autant de coupes). Une mesure posée *sur* l'objet sans pixels (image non chargée)
+est rattachée par défaut à la coupe suivante et marquée `stackMigration.orphan = true` : à
+vérifier. Chaque mesure renumérotée porte `stackMigration` (`fromFrameIndex`, fichiers
+retirés, date) ; son `sopInstanceUID` n'est jamais modifié. Relancer est sans effet.
+Toujours commencer par un **essai à blanc**, qui ne modifie rien et liste les items et les
+mesures concernés (`stackChanges`), et le faire hors séance de relecture (un viewer ouvert
+avant la renumérotation garde l'ancienne pile : le recharger) :
+
+```bash
+curl -H "Girder-Token: $TOKEN" -X POST -d '' "$GIRDER/api/v1/dmf/reprocess?folderId=$FOLDER&dryRun=true"
+```
+
 ```bash
 # Toutes les distances d'un examen (avec un token Girder)
 curl -H "Girder-Token: $TOKEN" \
@@ -239,7 +258,9 @@ Chaque mesure a la forme :
   "seriesInstanceUID": "…",
   "label": "",
   "user": { "id": "…", "login": "…", "name": "…" },
-  "createdAt": "ISO-8601"
+  "createdAt": "ISO-8601",
+  // Seulement si `reprocess` a renuméroté la mesure (objets sans pixels retirés, 0.6.0) :
+  "stackMigration": { "fromFrameIndex": 1, "orphan": false, "removedFileIds": ["…"], "at": "ISO-8601" }
 }
 ```
 
