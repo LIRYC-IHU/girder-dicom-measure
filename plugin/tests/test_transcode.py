@@ -355,3 +355,185 @@ def test_pixel_digest_none_without_pixels_or_dicom():
     del ds.PixelData
     assert _digest(_bytes(ds)) is None       # SR, PR… : pas de pixels
     assert _digest(b"pas un DICOM") is None
+
+
+# --- Concurrence : l'encodeur JPEG 2000 (openjpeg) n'est pas thread-safe -----------------
+# En prod (pylibjpeg-openjpeg 2.6.0), 4 encodages J2K simultanés dans le processus Girder le
+# faisaient planter en segfault. Les encodages J2K partent donc dans un pool de PROCESSUS
+# (`dmf.j2k_workers`) ; à défaut de pool, ils sont sérialisés dans le processus courant.
+
+
+@pytest.fixture
+def j2kWorkers():
+    """Règle la taille du pool pour un test, puis revient à 0 (module pur : pas de pool)."""
+    yield T.configureJ2kWorkers
+    T.configureJ2kWorkers(0)
+
+
+def _crashingEncode(data, transferSyntax, kwargs):
+    """Remplace `dmf_j2k_worker.encode` DANS le worker : simule un crash natif."""
+    os._exit(139)
+
+
+def _maxConcurrentCompress(monkeypatch, transferSyntax, threads=8):
+    import threading
+    import time
+
+    state = {"now": 0, "max": 0}
+    guard = threading.Lock()
+
+    def fakeCompress(self, uid, **kwargs):
+        with guard:
+            state["now"] += 1
+            state["max"] = max(state["max"], state["now"])
+        time.sleep(0.02)  # laisse aux autres threads le temps d'entrer s'ils le peuvent
+        with guard:
+            state["now"] -= 1
+
+    monkeypatch.setattr(Dataset, "compress", fakeCompress)
+    start = threading.Barrier(threads)
+
+    def run():
+        start.wait()
+        T._compress(Dataset(), transferSyntax)
+
+    pool = [threading.Thread(target=run) for _ in range(threads)]
+    for t in pool:
+        t.start()
+    for t in pool:
+        t.join()
+    return state["max"]
+
+
+@pytest.mark.parametrize("uid", [JPEG2000, pydicom.uid.JPEG2000Lossless])
+def test_in_process_j2k_encodes_are_serialized(monkeypatch, uid):
+    # Sans pool (défaut du module pur, ou `dmf.j2k_workers = 0`) : un seul à la fois.
+    assert _maxConcurrentCompress(monkeypatch, uid) == 1
+
+
+@pytest.mark.parametrize("uid", [JPEGLSLossless, RLELossless])
+def test_other_codecs_stay_parallel(monkeypatch, uid):
+    assert _maxConcurrentCompress(monkeypatch, uid) > 1
+
+
+def _requireJ2k():
+    pytest.importorskip("openjpeg")
+    pytest.importorskip("pylibjpeg")
+
+
+@pytest.mark.parametrize("mode", [T.MODE_LOSSY, T.MODE_LOSSLESS])
+def test_pool_output_is_identical_to_in_process(uncompressed, j2kWorkers, monkeypatch, mode):
+    _requireJ2k()
+    if mode == T.MODE_LOSSLESS:  # force le J2K sans perte (JPEG-LS passe avant sinon)
+        monkeypatch.setattr(T, "_LOSSLESS_CHAIN", (pydicom.uid.JPEG2000Lossless,))
+    local = T.transcode(uncompressed, mode=mode, ratio=10)
+    j2kWorkers(2)
+    pooled = T.transcode(uncompressed, mode=mode, ratio=10)
+    assert T._pool is not None  # l'encodage est bien passé par le pool
+    assert pooled.transferSyntax == local.transferSyntax
+    assert pooled.data == local.data  # même encodeur, mêmes paramètres → mêmes octets
+    out = pydicom.dcmread(io.BytesIO(pooled.data))
+    assert out.SOPInstanceUID == SOP_UID
+    if mode == T.MODE_LOSSY:
+        assert out.LossyImageCompression == "01"
+
+
+def test_built_frame_through_pool(uncompressed, j2kWorkers):
+    _requireJ2k()
+    j2kWorkers(2)
+    layout = T.frameLayout(io.BytesIO(uncompressed))
+    data = uncompressed[layout.offsetOf(3):layout.offsetOf(3) + layout.frameSize]
+    out = T.buildFrame(layout, data, 3, mode=T.MODE_LOSSY, ratio=10)
+    ds = pydicom.dcmread(io.BytesIO(out.data))
+    assert ds.file_meta.TransferSyntaxUID == JPEG2000
+    assert int(ds.NumberOfFrames) == 1 and ds.SOPInstanceUID == SOP_UID
+
+
+def test_crashed_worker_falls_back_then_pool_recovers(uncompressed, j2kWorkers, monkeypatch,
+                                                      caplog):
+    _requireJ2k()
+    j2kWorkers(2)
+    # Le worker importe `_crashingEncode` par son nom (spawn) : il meurt à la première tâche.
+    monkeypatch.setattr(T.dmf_j2k_worker, "encode", _crashingEncode)
+    with caplog.at_level("ERROR", logger="girder.dicom_measure_flow"):
+        out = T.transcode(uncompressed, mode=T.MODE_LOSSY, ratio=10)
+    assert out is not None and out.transferSyntax == str(JPEG2000)  # repli local réussi
+    assert "s'est arrêté brutalement" in caplog.text
+    assert T._pool is None  # pool cassé abandonné…
+
+    monkeypatch.undo()
+    assert T.transcode(uncompressed, mode=T.MODE_LOSSY, ratio=10) is not None
+    assert T._pool is not None  # … et recréé à l'encodage suivant
+
+
+def test_pool_is_disabled_after_repeated_failures(uncompressed, j2kWorkers, monkeypatch,
+                                                   caplog):
+    _requireJ2k()
+    j2kWorkers(2)
+    monkeypatch.setattr(T.dmf_j2k_worker, "encode", _crashingEncode)
+    with caplog.at_level("ERROR", logger="girder.dicom_measure_flow"):
+        for _ in range(T.POOL_MAX_FAILURES + 2):
+            out = T.transcode(uncompressed, mode=T.MODE_LOSSY, ratio=10)
+            assert out is not None and out.transferSyntax == str(JPEG2000)
+    # Exactement POOL_MAX_FAILURES pools tentés, puis plus aucun : encodage local.
+    assert caplog.text.count("s'est arrêté brutalement") == T.POOL_MAX_FAILURES
+    assert "pool DÉSACTIVÉ" in caplog.text
+    assert T._getPool() is None
+
+    monkeypatch.undo()
+    j2kWorkers(3)  # un changement de réglage réarme le pool
+    assert T.transcode(uncompressed, mode=T.MODE_LOSSY, ratio=10) is not None
+    assert T._pool is not None
+
+
+def test_configure_j2k_workers_is_tolerant(j2kWorkers):
+    j2kWorkers("pas un nombre")
+    assert T._j2kWorkers == T.defaultJ2kWorkers()
+    j2kWorkers(-3)
+    assert T._j2kWorkers == 0
+    assert 1 <= T.defaultJ2kWorkers() <= 4
+
+
+@pytest.mark.parametrize("workers", [0, 3])
+def test_real_parallel_j2k_encoding_does_not_crash(workers):
+    """Encodages J2K RÉELS depuis 8 threads, dans un sous-processus : sans protection, le
+    segfault tuerait pytest lui-même au lieu de faire échouer ce test. Couvre le repli
+    sérialisé (0 worker) ET le pool de processus."""
+    import subprocess
+    import sys
+    import textwrap
+
+    _requireJ2k()
+    script = textwrap.dedent(
+        """
+        import sys, threading
+        workers = int(sys.argv[1])
+        sys.path[:0] = sys.argv[2:]
+        import test_transcode as TT
+        import transcode as T
+        T.configureJ2kWorkers(workers)
+        data = TT._bytes(TT._dataset(rows=256, columns=256))
+        errors = []
+        def run():
+            try:
+                for _ in range(20):
+                    out = T.transcode(data, mode=T.MODE_LOSSY, ratio=10)
+                    assert out is not None and out.transferSyntax == str(T.JPEG2000), out
+            except BaseException as exc:
+                errors.append(repr(exc))
+        pool = [threading.Thread(target=run) for _ in range(8)]
+        [t.start() for t in pool]
+        [t.join() for t in pool]
+        assert (T._pool is not None) == (workers > 0)
+        print(errors[:1])
+        sys.exit(1 if errors else 0)
+        """
+    )
+    here = os.path.dirname(__file__)
+    root = os.path.join(here, "..")
+    pkg = os.path.join(root, "girder_dicom_measure_flow")
+    proc = subprocess.run(
+        [sys.executable, "-c", script, str(workers), here, root, pkg],
+        capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, (proc.returncode, proc.stdout[-500:], proc.stderr[-2000:])

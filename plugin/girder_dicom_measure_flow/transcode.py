@@ -27,14 +27,18 @@ estampille en revanche `LossyImageCompression`/`Ratio`/`Method` (le viewer l'aff
 Ce module n'importe NI Girder NI Mongo → testable avec pydicom seul (cf. tests/).
 """
 
+import concurrent.futures
 import copy
 import hashlib
 import io
 import logging
+import multiprocessing
 import os
 import struct
 import tempfile
+import threading
 
+import dmf_j2k_worker
 import pydicom
 from pydicom.uid import (
     JPEG2000,
@@ -161,12 +165,173 @@ def inspect(fp):
     return None if _isEncodable(ds) else SKIP_UNSUPPORTED
 
 
+# --- Encodage JPEG 2000 : jamais deux à la fois dans un même processus -------------------
+#
+# L'encodeur openjpeg (pylibjpeg-openjpeg 2.6.0 au moins) N'EST PAS thread-safe : deux
+# encodages simultanés dans un processus le font planter en code natif (segfault, aucun
+# traceback Python). Or Girder (ASGI) traite les requêtes dans un pool de threads et le
+# viewer précharge plusieurs frames en parallèle → en prod, Girder redémarrait en boucle, et
+# chaque crash coupait toutes les requêtes en cours, uploads compris.
+#
+# Les encodages J2K (avec ET sans perte) partent donc dans un POOL DE PROCESSUS : chaque
+# worker a son propre encodeur et n'encode qu'une frame à la fois → parallélisme retrouvé
+# (débit ~linéaire en nombre de workers), et un crash natif ne tue plus qu'un worker. Repli
+# (pool désactivé, cassé ou bloqué) : encodage dans le processus courant, SÉRIALISÉ par
+# `_j2kLock`. JPEG-LS (CharLS) et RLE restent dans les threads : vérifiés sûrs sous 8 threads.
+_J2K_SYNTAXES = frozenset((JPEG2000, JPEG2000Lossless))
+_j2kLock = threading.Lock()
+
+# Délai max d'un encodage dans un worker : au-delà, il est jugé bloqué (pool recréé).
+J2K_TASK_TIMEOUT = 120
+
+# Coupe-circuit : après N pools cassés D'AFFILÉE (p.ex. workers qui meurent dès le démarrage),
+# on cesse d'en recréer — sinon chaque requête relancerait des processus voués à mourir.
+# Réarmé par un changement de `dmf.j2k_workers` (ou un redémarrage de Girder).
+POOL_MAX_FAILURES = 3
+
+_poolGuard = threading.Lock()
+_pool = None
+_poolFailures = 0
+_poolDisabled = False
+# 0 = pas de pool (encodage sérialisé dans le processus). Le module pur part de 0 ; Girder
+# le règle depuis `dmf.j2k_workers` (cf. streaming), dont le défaut est `defaultJ2kWorkers()`.
+_j2kWorkers = 0
+
+
+def defaultJ2kWorkers():
+    """Nombre de workers J2K par défaut : les CPU utilisables, plafonnés à 4."""
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except AttributeError:  # macOS
+        cpus = os.cpu_count() or 1
+    return max(1, min(4, cpus))
+
+
+def configureJ2kWorkers(count):
+    """Fixe la taille du pool (0 = pas de pool). Sans effet si elle ne change pas : appelable
+    à chaque requête. Un changement remplace le pool ; les encodages déjà lancés dans
+    l'ancien vont à leur terme."""
+    global _pool, _j2kWorkers, _poolFailures, _poolDisabled
+    try:
+        count = max(0, int(count))
+    except (TypeError, ValueError):
+        count = defaultJ2kWorkers()
+    with _poolGuard:
+        if count == _j2kWorkers:
+            return
+        _j2kWorkers = count
+        _poolFailures, _poolDisabled = 0, False
+        old, _pool = _pool, None
+    if old is not None:
+        old.shutdown(wait=False)
+
+
+def _getPool():
+    global _pool
+    with _poolGuard:
+        if _j2kWorkers <= 0 or _poolDisabled:
+            return None
+        if _pool is None:
+            # `spawn`, pas `fork` : forker un Girder multi-threadé (client Mongo, verrous
+            # tenus par d'autres threads) peut figer le fils. Les workers démarrent à la
+            # demande et ne chargent que pydicom + le codec (cf. dmf_j2k_worker).
+            _pool = concurrent.futures.ProcessPoolExecutor(
+                _j2kWorkers, mp_context=multiprocessing.get_context("spawn")
+            )
+        return _pool
+
+
+def _discardPool(pool):
+    """Abandonne un pool cassé ou bloqué ; le prochain appel en recrée un — sauf après
+    `POOL_MAX_FAILURES` échecs d'affilée (coupe-circuit)."""
+    global _pool, _poolFailures, _poolDisabled
+    with _poolGuard:
+        if _pool is pool:
+            _pool = None
+            _poolFailures += 1
+            if _poolFailures >= POOL_MAX_FAILURES and not _poolDisabled:
+                _poolDisabled = True
+                logger.error(
+                    "[dmf] %d pools d'encodage JPEG 2000 cassés d'affilée : pool DÉSACTIVÉ, "
+                    "encodages J2K sérialisés dans le processus Girder jusqu'au prochain "
+                    "changement de dmf.j2k_workers ou redémarrage.", _poolFailures
+                )
+    kill = getattr(pool, "kill_workers", None)  # Python ≥ 3.14 : tue un worker bloqué
+    if kill is not None:
+        try:
+            kill()
+        except Exception:
+            pass
+    pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _poolSucceeded(pool):
+    global _poolFailures
+    if _poolFailures:
+        with _poolGuard:
+            if _pool is pool:
+                _poolFailures = 0
+
+
+def _encodeInWorker(ds, transferSyntax, kwargs):
+    """Encode `ds` EN PLACE dans un worker. False si le pool est indisponible (désactivé,
+    cassé, bloqué) → à l'appelant d'encoder lui-même. Une erreur de l'ENCODEUR (format
+    refusé…) remonte telle quelle, comme `ds.compress()` en direct."""
+    pool = _getPool()
+    if pool is None:
+        return False
+    # Une frame reconstruite (`buildFrame`) porte des pixels de VR ambiguë « OB or OW » :
+    # `compress()` s'en accommode, pas l'écriture du fichier à transmettre au worker.
+    pixels = ds["PixelData"] if "PixelData" in ds else None
+    if pixels is not None and pixels.VR not in ("OB", "OW"):
+        pixels.VR = "OW" if int(ds.get("BitsAllocated") or 8) > 8 else "OB"
+    buf = io.BytesIO()
+    try:
+        ds.save_as(buf, enforce_file_format=True)
+    except Exception as exc:
+        logger.debug("[dmf] dataset non sérialisable pour le worker J2K (%r) : encodage local",
+                     exc)
+        return False
+    try:
+        future = pool.submit(dmf_j2k_worker.encode, buf.getvalue(), str(transferSyntax), kwargs)
+        out = future.result(timeout=J2K_TASK_TIMEOUT)
+    except concurrent.futures.BrokenExecutor:
+        logger.error(
+            "[dmf] un worker d'encodage JPEG 2000 s'est arrêté brutalement (crash natif ?) : "
+            "pool recréé, encodage refait dans le processus Girder."
+        )
+        _discardPool(pool)
+        return False
+    except concurrent.futures.TimeoutError:
+        logger.error(
+            "[dmf] encodage JPEG 2000 bloqué depuis plus de %d s dans un worker : pool "
+            "recréé, encodage refait dans le processus Girder.", J2K_TASK_TIMEOUT
+        )
+        _discardPool(pool)
+        return False
+    except RuntimeError:
+        return False  # pool arrêté entre-temps (changement de réglage) : repli local
+    _poolSucceeded(pool)
+    encoded = pydicom.dcmread(io.BytesIO(out))
+    # Recopie du résultat dans `ds` : `ds.compress()` agit en place et les appelants
+    # continuent de travailler sur ce même objet.
+    ds.file_meta = encoded.file_meta
+    for elem in encoded:
+        ds[elem.tag] = elem
+    return True
+
+
 def _compress(ds, transferSyntax, **kwargs):
     # `generate_instance_uid=False` : pydicom renouvelle le SOPInstanceUID par défaut (règle
     # de conformance pour une image DÉRIVÉE que l'on archiverait). Ici la sortie n'est qu'une
     # représentation de transport de l'original — et les mesures déjà enregistrées le
     # référencent par ce même UID. On le CONSERVE donc.
-    ds.compress(transferSyntax, generate_instance_uid=False, **kwargs)
+    if transferSyntax in _J2K_SYNTAXES:
+        if not _encodeInWorker(ds, transferSyntax, kwargs):
+            with _j2kLock:
+                ds.compress(transferSyntax, generate_instance_uid=False, **kwargs)
+    else:
+        ds.compress(transferSyntax, generate_instance_uid=False, **kwargs)
     return ds
 
 

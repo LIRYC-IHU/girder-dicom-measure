@@ -88,6 +88,7 @@ def streaming(tmp_path, monkeypatch):
         "dmf.compression_max_mb": 0,
         "dmf.cache_dir": str(tmp_path),
         "dmf.cache_max_mb": 0,
+        "dmf.j2k_workers": 0,
     }
 
     def _module(name, **attrs):

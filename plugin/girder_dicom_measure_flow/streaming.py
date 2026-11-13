@@ -40,6 +40,7 @@ from .transcode import (
     SKIP_UNSUPPORTED,
     TranscodeCache,
     cacheKey,
+    configureJ2kWorkers,
     inspect,
     normalizeMode,
     transcode,
@@ -91,6 +92,12 @@ def cache():
             _cache = TranscodeCache(directory, maxBytes)
             _cacheParams = params
         return _cache
+
+
+def applyJ2kWorkers():
+    """Aligne le pool d'encodage J2K sur `dmf.j2k_workers` (sans effet s'il n'a pas changé).
+    Appelé juste avant d'encoder : un changement de réglage s'applique sans redémarrage."""
+    configureJ2kWorkers(Setting().get(PluginSettings.J2K_WORKERS))
 
 
 def _maxBytes():
@@ -197,6 +204,7 @@ def _produce(file, mode, ratio):
     if maxBytes and (file.get("size") or 0) > maxBytes:
         return b"", SKIP_TOO_LARGE, True
     try:
+        applyJ2kWorkers()
         data = _readFile(file)
         result = transcode(data, mode, ratio, maxBytes=maxBytes)
     except Exception:
@@ -224,6 +232,7 @@ def _produceFrame(file, index, mode, ratio):
             frameBytes = _readExactly(fp, layout.frameSize)
         if len(frameBytes) != layout.frameSize:
             return b"", SKIP_ERROR, False  # source tronquée : ne pas mémoriser
+        applyJ2kWorkers()
         result = buildFrame(layout, frameBytes, index, mode, ratio)
     except Exception:
         logger.exception("[dmf] frame %d de %s : encodage impossible", index, file.get("name"))

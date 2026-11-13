@@ -16,6 +16,10 @@ mode ou le ratio invalide de fait le cache (la clé en dépend).
 
 `dmf.compression_max_mb`, `dmf.cache_dir`, `dmf.cache_max_mb` : garde-fous du transcodage
 (taille max d'un fichier transcodé en mémoire, emplacement et taille du cache disque).
+
+`dmf.j2k_workers` : nombre de PROCESSUS d'encodage JPEG 2000 (cf. transcode.py — l'encodeur
+n'est pas thread-safe, d'où des processus plutôt que des threads). 0 = pas de processus :
+encodage J2K sérialisé dans Girder. Prise en compte immédiate.
 """
 
 import os
@@ -23,7 +27,7 @@ import os
 from girder.exceptions import ValidationException
 from girder.utility import setting_utilities
 
-from .transcode import MODES, MODE_LOSSLESS
+from .transcode import MODES, MODE_LOSSLESS, defaultJ2kWorkers
 
 
 class PluginSettings:
@@ -33,6 +37,10 @@ class PluginSettings:
     COMPRESSION_MAX_MB = "dmf.compression_max_mb"
     CACHE_DIR = "dmf.cache_dir"
     CACHE_MAX_MB = "dmf.cache_max_mb"
+    J2K_WORKERS = "dmf.j2k_workers"
+
+# Plafond de `dmf.j2k_workers` : chaque worker est un processus Python (~60-80 Mo).
+MAX_J2K_WORKERS = 32
 
 
 # Valeurs par défaut, également servies telles quelles à la page de configuration.
@@ -43,6 +51,7 @@ DEFAULTS = {
     PluginSettings.COMPRESSION_MAX_MB: 512,
     PluginSettings.CACHE_DIR: "",  # vide → dossier temporaire du système
     PluginSettings.CACHE_MAX_MB: 4096,
+    PluginSettings.J2K_WORKERS: defaultJ2kWorkers(),  # CPU utilisables, plafonnés à 4
 }
 
 
@@ -137,4 +146,22 @@ def _validate_cache_dir(doc):
     value = str(doc.get("value") or "").strip()
     if value and not os.path.isabs(value):
         raise ValidationException("Le dossier de cache doit être un chemin absolu.", "value")
+    doc["value"] = value
+
+
+@setting_utilities.default(PluginSettings.J2K_WORKERS)
+def _default_j2k_workers():
+    return DEFAULTS[PluginSettings.J2K_WORKERS]
+
+
+@setting_utilities.validator(PluginSettings.J2K_WORKERS)
+def _validate_j2k_workers(doc):
+    try:
+        value = int(doc.get("value"))
+    except (TypeError, ValueError):
+        raise ValidationException("Le nombre de processus doit être un entier.", "value")
+    if not 0 <= value <= MAX_J2K_WORKERS:
+        raise ValidationException(
+            "Le nombre de processus doit être compris entre 0 et %d." % MAX_J2K_WORKERS, "value"
+        )
     doc["value"] = value

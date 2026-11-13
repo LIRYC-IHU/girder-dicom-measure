@@ -194,6 +194,13 @@
       help: 'Éviction des entrées les moins récemment lues. 0 = pas de limite.',
     },
     {
+      key: 'dmf.j2k_workers', type: 'number', label: 'Processus d\'encodage JPEG 2000',
+      min: 0, max: 32, step: 1,
+      help: "Encodages JPEG 2000 en parallèle (un processus chacun : l'encodeur n'est pas " +
+            'thread-safe). Défaut : nombre de CPU, plafonné à 4. 0 = un seul encodage à la ' +
+            'fois, dans le processus Girder.',
+    },
+    {
       key: 'dmf.viewer_path', type: 'text', label: 'Chemin du viewer',
       help: 'Un seul segment, commençant par « / ». Prend effet au REDÉMARRAGE de Girder ' +
             '(les autres réglages sont appliqués immédiatement).',

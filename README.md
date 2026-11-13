@@ -131,6 +131,7 @@ monochromes ; une image couleur retombe sur le mode sans perte. Un fichier **dé
 | `dmf.compression_max_mb` | `512` | au-delà, fichier envoyé tel quel (0 = pas de limite) |
 | `dmf.cache_dir` | *(tmp système)* | dossier du cache des fichiers transcodés |
 | `dmf.cache_max_mb` | `4096` | taille du cache, éviction LRU (0 = pas de limite) |
+| `dmf.j2k_workers` | *(CPU, max 4)* | processus d'encodage JPEG 2000 en parallèle (0 = un seul encodage à la fois, dans Girder) |
 | `dmf.viewer_path` | `/dmf` | chemin de montage de la SPA |
 
 > En Docker, le cache est par défaut dans le `/tmp` du conteneur (perdu au redémarrage).

@@ -112,6 +112,24 @@ doit pas le rendre impossible.
     lève `GirderException` dès que la taille dépasse `core.filehandle_max_size` (16 Mo par
     défaut) — c'est-à-dire pour à peu près toute boucle de scopie. Un `read()` non borné a
     fait repartir les fichiers non compressés en production.
+  - **Encodage JPEG 2000 dans un POOL DE PROCESSUS** (0.6.1, `transcode._encodeInWorker`) :
+    l'encodeur openjpeg (`pylibjpeg-openjpeg` 2.6.0) n'est PAS thread-safe — 2 à 4 encodages
+    simultanés dans un processus = segfault de Girder (aucun traceback, Docker relance,
+    openresty répond 502 à tout le monde, uploads en cours compris). Constaté en prod en mode
+    `lossy` sous le préchargement parallèle du viewer. Les encodages J2K (avec ET sans perte)
+    partent donc dans `dmf.j2k_workers` processus (défaut : CPU plafonnés à 4 ; débit ~linéaire,
+    un crash ne tue plus qu'un worker). JPEG-LS (CharLS) et RLE restent dans les threads.
+    - Workers en **`spawn`** (pas `fork` : Girder est multi-threadé) ; la fonction exécutée vit
+      dans **`dmf_j2k_worker.py`, module de PREMIER niveau** (`py-modules`) — dans le package,
+      chaque worker importerait `__init__` donc tout Girder.
+    - Repli **sérialisé par `_j2kLock`** dans le processus Girder si pool à 0, cassé
+      (`BrokenExecutor` → pool recréé) ou bloqué (`J2K_TASK_TIMEOUT`). Coupe-circuit : après
+      `POOL_MAX_FAILURES` pools cassés d'affilée, plus de pool jusqu'au prochain changement du
+      réglage. NE JAMAIS appeler l'encodeur J2K hors de ces deux chemins.
+    - Le dataset part au worker sérialisé : une frame de `buildFrame` a un `PixelData` de VR
+      ambiguë (`OB or OW`) qu'il faut fixer avant `save_as`.
+    - Garde-fou : `test_real_parallel_j2k_encoding_does_not_crash` (sous-processus, 8 threads
+      réels, pool ET repli) — reproduit le segfault si la protection saute.
   - **Un échec technique n'est jamais mémorisé** comme « non transcodable » : seules les
     propriétés stables du fichier (déjà compressé, non-DICOM, format non géré, aucun gain)
     créent une entrée négative. Sinon une panne passagère condamne le fichier pour toujours.
