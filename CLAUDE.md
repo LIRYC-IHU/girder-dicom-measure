@@ -206,6 +206,26 @@ autres) : transparent pour la SPA, qui ne voit qu'une session.
 - **Backfill** : `POST /api/v1/dmf/reprocess[?folderId=]` (admin) retraite les items DICOM
   existants (extraction + tri) → couvre les uploads antérieurs à l'install. `processItem`
   reconstruit `item['dicom']` from scratch.
+- **Objets DICOM sans pixels** (0.6.0) : PR, SR, KO, DICOMDIR… rangés dans le même item qu'une
+  image. Critère = donnée pixel de PREMIER niveau (`dicom_tags.at_pixel_data`, lu sur le flux
+  juste après `dcmread(stop_before_pixels=True)` ; relecture filtrée en syntaxe déflatée), pas
+  une liste de SOP Class. Ils vont dans `item.dicom.nonImageFiles`, JAMAIS dans `files` (donc
+  ni dans le stack ni dans `GET /dmf/item/:id/files`), et ne participent pas à `meta` (un PR
+  en retirait `ImagerPixelSpacing`). Item indexé sans aucune image → `files: []` et `getFiles`
+  renvoie `[]` (pas de repli sur les fichiers bruts, qui ré-empilerait le PR).
+  - Les items indexés AVANT 0.6.0 gardent le PR dans `files` tant qu'on ne lance pas
+    `reprocess` : PAS de filtrage à la lecture dans `getFiles` — il décalerait les `frameIndex`
+    des mesures existantes sans les renuméroter. Le retrait passe par `processItem`, qui
+    renumérote d'abord les mesures (`stack.py` pur + `_planStackChange`), PUIS écrit `dicom`
+    (interruption entre les deux → pas de double décalage, grâce à `stackMigration.removedFileIds`).
+    Orpheline (posée SUR le PR) → coupe suivante, `stackMigration.orphan`, UID inchangé.
+    `dryRun=true` rapporte sans écrire (ni calculer d'empreinte).
+  - Côté viewer (`viewer/imageGuard.ts`) : sur un échec de chargement, Cornerstone avance
+    `getCurrentImageId()` mais laisse l'image PRÉCÉDENTE à l'écran → une mesure y aurait
+    l'UID/l'index de la coupe en échec et la géométrie d'une autre image. Garde : l'image
+    référencée doit être `getCornerstoneImage().imageId` ; outils de mesure passifs + bandeau
+    sur une coupe en échec (`IMAGE_LOAD_ERROR`), refus à `ANNOTATION_COMPLETED` et au clic
+    niveau. En rendu CPU, `setStack` REJETTE si la 1re coupe échoue (le GPU résout) → capturé.
 - **Indexation concurrente** : `data.process` tourne dans le thread de la requête d'upload, donc
   les fichiers d'une série envoyés EN PARALLÈLE indexent le même item simultanément. Toute
   écriture de `item.dicom` est ciblée (`$set`, JAMAIS `Item().save()`) et incrémente la révision

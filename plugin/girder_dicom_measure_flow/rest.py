@@ -177,8 +177,12 @@ class DmfResource(Resource):
         )
     )
     def getFiles(self, item):
+        # Item indexé : ses IMAGES seulement, triées (les objets sans pixels — PR, SR… — sont
+        # rangés à part, cf. dicom_metadata). Liste vide = item indexé sans aucune image, et
+        # non « pas indexé » : retomber sur tous les fichiers ré-empilerait justement ces
+        # objets. Le repli ne vaut que pour un item jamais indexé.
         entries = (item.get("dicom") or {}).get("files")
-        if entries:
+        if entries is not None:
             docs = [(str(f["_id"]), f.get("name"), f) for f in entries]
         else:
             docs = [(str(f["_id"]), f["name"], None) for f in Item().childFiles(item)]
@@ -321,7 +325,10 @@ class DmfResource(Resource):
             "pixels). Backfill des items uploadés avant l'installation du plugin. Admin uniquement. "
             "Les empreintes déjà connues sont conservées : seuls les fichiers sans empreinte sont "
             "relus en entier (le premier passage sur une grosse collection peut être long : "
-            "préférer un appel par dossier)."
+            "préférer un appel par dossier). Les objets DICOM sans pixels (PR, SR…) sortent de "
+            "la liste des coupes : sur un item indexé avant 0.6.0, les `frameIndex` de ses mesures "
+            "sont renumérotés (provenance dans `stackMigration`). `dryRun` d'abord : le rapport "
+            "liste chaque item dont le stack change et chaque mesure déplacée, sans rien écrire."
         )
         .param(
             "folderId",
@@ -330,8 +337,10 @@ class DmfResource(Resource):
         )
         .param("rehash", "Recalculer toutes les empreintes des pixels.", required=False,
                dataType="boolean", default=False)
+        .param("dryRun", "N'écrire rien : rapporter ce qui changerait (stacks, mesures).",
+               required=False, dataType="boolean", default=False)
     )
-    def reprocess(self, folderId, rehash):
+    def reprocess(self, folderId, rehash, dryRun):
         _checkSameOrigin()
         user = getCurrentUser()
         if folderId:
@@ -339,14 +348,28 @@ class DmfResource(Resource):
             items = (Item().load(iid, force=True) for iid in _folderItemIds(folder, user))
         else:
             items = Item().find({})
-        scanned = processed = 0
+        scanned = processed = nonImage = 0
+        stackChanges = []
         for item in items:
             if item is None:
                 continue
             scanned += 1
-            if processItem(item, rehash=rehash):
-                processed += 1
-        return {"scanned": scanned, "dicomItems": processed}
+            report = processItem(item, rehash=rehash, dryRun=dryRun)
+            if report is None:
+                continue
+            processed += 1
+            nonImage += report["nonImageFiles"]
+            if "removedFromStack" in report:
+                stackChanges.append(report)
+        return {
+            "dryRun": dryRun,
+            "scanned": scanned,
+            "dicomItems": processed,
+            "nonImageFiles": nonImage,
+            # Items indexés avant 0.6.0 dont des objets sans pixels sortent de la pile, avec
+            # leurs mesures renumérotées (ou à renuméroter, en `dryRun`).
+            "stackChanges": stackChanges,
+        }
 
     # --- Empreintes des pixels ------------------------------------------------
 

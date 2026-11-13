@@ -47,6 +47,18 @@ export interface Measurement {
   user: MeasurementUser;
   createdAt: string; // ISO-8601 UTC
   appVersion: string;
+  /** Renumérotation SERVEUR (`POST /dmf/reprocess`, plugin 0.6.0) : objets DICOM sans pixels
+   *  (PR, SR…) sortis du stack. `orphan` = la mesure avait été posée SUR un tel objet (image
+   *  non affichable) et a été rattachée par défaut à la coupe suivante : à vérifier. */
+  stackMigration?: StackMigration;
 }
 
-export const APP_VERSION = '0.5.1';
+export interface StackMigration {
+  reason: string;
+  at: string;
+  fromFrameIndex: number | null;
+  orphan: boolean;
+  removedFileIds: string[];
+}
+
+export const APP_VERSION = '0.6.0';

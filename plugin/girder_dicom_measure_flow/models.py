@@ -96,6 +96,10 @@ class Annotation(Model):
                 "createdAt": doc.get("created"),  # Girder sérialise les datetime en ISO
             }
         )
+        # Renumérotation par `reprocess` (objets non-image retirés de la pile, 0.6.0) : champ
+        # SERVEUR, jamais lu depuis le client (absent de `_MEASUREMENT_FIELDS`).
+        if doc.get("stackMigration"):
+            out["stackMigration"] = doc["stackMigration"]
         return out
 
 

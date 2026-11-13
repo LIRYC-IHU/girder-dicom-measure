@@ -142,6 +142,10 @@ html, body, #root {
   opacity: 0.45;
 }
 
+.mrow-go .msub.warn {
+  color: #ffd479;
+}
+
 .mrow-actions {
   display: flex;
   align-items: center;
@@ -236,6 +240,12 @@ html, body, #root {
   background: rgba(74, 58, 18, 0.9);
   color: #ffd479;
   font-size: 0.85rem;
+}
+
+/* Coupe sans image / mesure refusée (cf. viewer/imageGuard.ts). */
+.banner-error {
+  background: rgba(90, 20, 20, 0.92);
+  color: #ffb3b3;
 }
 
 .error { color: #ff8080; padding: 1rem; }

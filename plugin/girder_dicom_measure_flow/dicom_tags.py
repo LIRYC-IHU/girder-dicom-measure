@@ -5,6 +5,7 @@ Utilisées par `dicom_metadata.py` (extraction + tri à l'upload / au backfill).
 """
 
 import datetime
+import struct
 
 import pydicom
 import pydicom.multival
@@ -67,6 +68,56 @@ def coerce_metadata(dataset):
         except ValueError:
             continue
     return metadata
+
+
+# Éléments de données pixel de premier niveau (entier, flottant, double) : ceux devant
+# lesquels `dcmread(stop_before_pixels=True)` s'arrête.
+PIXEL_DATA_TAGS = frozenset({(0x7FE0, 0x0010), (0x7FE0, 0x0008), (0x7FE0, 0x0009)})
+
+
+def at_pixel_data(fp, dataset):
+    """Le flux est-il positionné sur une donnée pixel de PREMIER NIVEAU ?
+
+    À appeler juste après `pydicom.dcmread(fp, stop_before_pixels=True)`, qui laisse le flux
+    sur l'élément pixel quand il y en a un, et en fin de fichier (ou sur un élément de
+    remplissage final) sinon. Sert à distinguer une IMAGE d'un objet DICOM sans pixels —
+    état de présentation (PR), rapport structuré (SR), sélection d'objets (KO), DICOMDIR… —
+    sans relire le fichier. Une `PixelData` imbriquée (icône d'un DICOMDIR) ne compte pas.
+    La position du flux est restaurée.
+
+    Exception : en syntaxe DÉFLATÉE, le dataset est compressé (zlib) après la méta, et le
+    flux brut ne dit rien de l'endroit où pydicom s'est arrêté → on relit le fichier en ne
+    gardant que les éléments pixel (cas rare : surtout des SR, petits).
+    """
+    meta = getattr(dataset, "file_meta", None)
+    ts = getattr(meta, "TransferSyntaxUID", None) if meta is not None else None
+    try:
+        deflated = ts is not None and ts.is_deflated
+        littleEndian = True if ts is None else bool(ts.is_little_endian)
+    except ValueError:  # syntaxe privée/inconnue : petit-boutiste, comme la quasi-totalité
+        deflated, littleEndian = False, True
+    if deflated:
+        return _has_pixel_data_deflated(fp)
+    start = fp.tell()
+    try:
+        raw = fp.read(4)
+    finally:
+        fp.seek(start)
+    if len(raw) < 4:
+        return False
+    return struct.unpack("<HH" if littleEndian else ">HH", raw) in PIXEL_DATA_TAGS
+
+
+def _has_pixel_data_deflated(fp):
+    start = fp.tell()
+    try:
+        fp.seek(0)
+        ds = pydicom.dcmread(
+            fp, defer_size=64, specific_tags=[(g << 16) | e for g, e in PIXEL_DATA_TAGS]
+        )
+        return any(((g << 16) | e) in ds for g, e in PIXEL_DATA_TAGS)
+    finally:
+        fp.seek(start)
 
 
 def sortable(value):

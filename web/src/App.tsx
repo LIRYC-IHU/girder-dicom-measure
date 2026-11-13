@@ -112,6 +112,13 @@ function frameCounter(current: number, loaded: number, total: number): string {
 async function loadGirder(itemId: string): Promise<Ready> {
   // Fichiers DANS L'ORDRE DES COUPES (tri serveur via item.dicom.files, sinon repli).
   const [user, fileUrls] = await Promise.all([girder.me(), girder.orderedFileUrls(itemId)]);
+  // Le plugin (≥ 0.6.0) n'empile que les IMAGES : un item qui ne contient que des objets
+  // DICOM sans pixels (état de présentation, rapport structuré…) n'a rien à afficher.
+  if (fileUrls.length === 0) {
+    throw new Error(
+      "Aucune image affichable dans cet item (seulement des objets DICOM sans pixels : état de présentation, rapport structuré…).",
+    );
+  }
   const store = new AnnotationStore(itemId);
   await store.load();
   return { fileUrls, user, store, source: `item ${itemId}` };
@@ -301,8 +308,17 @@ export default function App() {
                 >
                   <span className="mtype">{TYPE_LABEL[m.type]}</span>
                   <span className="mmeta">
-                    coupe {m.frameIndex + 1} · {measurementSummary(m)}
+                    coupe {m.frameIndex != null ? m.frameIndex + 1 : '—'} ·{' '}
+                    {measurementSummary(m)}
                   </span>
+                  {m.stackMigration?.orphan && (
+                    <span
+                      className="msub warn"
+                      title="Mesure posée sur un objet DICOM sans pixels (état de présentation…), rattachée par défaut à la coupe suivante lors de la renumérotation : à vérifier, et à refaire si besoin."
+                    >
+                      ⚠ posée sur une coupe non affichable — à vérifier
+                    </span>
+                  )}
                   <span className="msub">
                     {m.user?.name ?? '—'} · {formatTimestamp(m.createdAt)}
                   </span>
